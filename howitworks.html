@@ -1,43 +1,838 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" itemscope itemtype="https://schema.org/WebPage">
 <head>
-<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-5992381116749724"
-     crossorigin="anonymous"></script>
-<!-- Google tag (gtag.js) -->
-<script async src="https://www.googletagmanager.com/gtag/js?id=G-K4KXR4FZCP"></script>
-<script>
-  window.dataLayer = window.dataLayer || [];
-  function gtag(){dataLayer.push(arguments);}
-  gtag('js', new Date());
+    <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-5992381116749724"
+         crossorigin="anonymous"></script>
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-K4KXR4FZCP"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+      gtag('config', 'G-K4KXR4FZCP');
+    </script>
 
-  gtag('config', 'G-K4KXR4FZCP');
-</script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="title" content="How It Works | ChatGPT Celebrity Selfie AI Photo Editing Prompts">
-<meta name="description" content="How It Works | ChatGPT Celebrity Selfie AI Photo Editing Prompts is the trending ai photo editing prompt generator website it will make your uploaded photo by a single prompt and get your exciting editable photo by ai ">
-<meta name="keywords" content="Chatgpt Sticker Trend promt,viral prompt,prompt ai editing, Ai tools ,Ai prompt generator,prompt converter, prompt optimizer,midjourney ai editing ,midjourney photo editing prompt">
-<meta name="robots" content="index, follow">
-<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-<meta name="language" content="English">
+    <meta name="title" content="How It Works | ToolsPrompt – AI Prompt Marketplace, Channels & Monetization">
+    <meta name="description" content="Learn how ToolsPrompt works: generate AI images & videos free, buy and sell AI prompts, create your own channel, earn 80% commission, get paid via UPI/bank, and monetize with ad-network affiliate links like Monetag and Adsterra.">
+    <meta name="keywords" content="how toolsprompt works, AI prompt marketplace, buy AI prompts, sell AI prompts, AI channel creation, earn from AI prompts, AI image generator, AI video generator, prompt monetization, ad network affiliate, Monetag, Adsterra, PropellerAds">
+    <meta name="robots" content="index, follow">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <meta name="language" content="English">
 
-    <title>How It Works | ChatGPT Celebrity Selfie AI Photo Editing Prompts</title>
+    <title>How It Works | ToolsPrompt – AI Marketplace, Channels, & Monetization</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="styles.css">
-<!-- Add this in the <head> section of each HTML file -->
-<link rel="icon" type="image/png" href="/favicon.png">
-<!-- Add to <head> section -->
-<script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-auth-compat.js"></script>
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-auth-compat.js"></script>
+
+    <style>
+        /* ============================================================
+           GLOBAL RESET & BASE
+           ============================================================ */
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html { scroll-behavior: smooth; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #f5f7fa;
+            color: #2d334a;
+            line-height: 1.6;
+        }
+        .container { max-width: 1200px; margin: 0 auto; padding: 0 20px; }
+        a { color: #4e54c8; }
+
+        /* ============================================================
+           HEADER
+           ============================================================ */
+        header {
+            background: rgba(255, 255, 255, 0.98);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+            box-shadow: 0 2px 15px rgba(0, 0, 0, 0.08);
+            transition: all 0.3s ease;
+        }
+        header nav {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 0;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            text-decoration: none;
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: #4e54c8;
+            flex-shrink: 0;
+        }
+        .logo img { width: 50px; height: 50px; border-radius: 8px; object-fit: contain; }
+        .logo span {
+            background: linear-gradient(135deg, #4e54c8 0%, #8f94fb 100%);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .nav-links {
+            display: flex;
+            gap: 22px;
+            list-style: none;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .nav-links a {
+            text-decoration: none;
+            color: #2d334a;
+            font-weight: 500;
+            font-size: 0.92rem;
+            transition: color 0.3s ease;
+            white-space: nowrap;
+            position: relative;
+        }
+        .nav-links a:hover { color: #4e54c8; }
+        .nav-links a::after {
+            content: "";
+            position: absolute;
+            bottom: -4px; left: 0;
+            width: 0; height: 2px;
+            background: #4e54c8;
+            transition: width 0.3s ease;
+        }
+        .nav-links a:hover::after { width: 100%; }
+        #authSection {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-shrink: 0;
+        }
+        #authSection .login-btn,
+        #authSection .cta-button {
+            padding: 8px 20px;
+            border-radius: 30px;
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 0.88rem;
+            transition: all 0.3s ease;
+            white-space: nowrap;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        #authSection .login-btn {
+            background: transparent;
+            color: #4e54c8;
+            border: 2px solid #4e54c8;
+        }
+        #authSection .login-btn:hover { background: #4e54c8; color: white; }
+        #authSection .cta-button {
+            background: linear-gradient(135deg, #4e54c8 0%, #8f94fb 100%);
+            color: white;
+            border: none;
+        }
+        #authSection .cta-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 18px rgba(78, 84, 200, 0.35);
+        }
+        .mobile-toggle {
+            display: none;
+            font-size: 1.4rem;
+            color: #4e54c8;
+            cursor: pointer;
+            padding: 6px 10px;
+            border-radius: 8px;
+            transition: background 0.3s ease;
+        }
+        .mobile-toggle:hover { background: #eef0f5; }
+
+        /* ============================================================
+           PAGE-SPECIFIC STYLES
+           ============================================================ */
+        .hiw-hero {
+            background: linear-gradient(135deg, #4e54c8 0%, #8f94fb 100%);
+            color: white;
+            padding: 60px 20px 50px;
+            text-align: center;
+            border-radius: 0 0 30px 30px;
+            margin-bottom: 40px;
+            position: relative;
+            overflow: hidden;
+        }
+        .hiw-hero::before {
+            content: "🚀";
+            position: absolute;
+            font-size: 16rem;
+            opacity: 0.06;
+            right: -60px; top: -60px;
+            transform: rotate(20deg);
+        }
+        .hiw-hero h1 {
+            font-size: 2.6rem;
+            font-weight: 800;
+            margin-bottom: 15px;
+            position: relative;
+            z-index: 1;
+        }
+        .hiw-hero p {
+            font-size: 1.15rem;
+            max-width: 720px;
+            margin: 0 auto;
+            opacity: 0.95;
+            line-height: 1.6;
+            position: relative;
+            z-index: 1;
+        }
+        .hiw-hero .hero-badges {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            justify-content: center;
+            margin-top: 25px;
+            position: relative;
+            z-index: 1;
+        }
+        .hiw-hero .hero-badge {
+            background: rgba(255, 255, 255, 0.18);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            padding: 8px 18px;
+            border-radius: 30px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            backdrop-filter: blur(8px);
+        }
+
+        /* Feature Cards */
+        .feature-grid-6 {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 22px;
+            margin: 30px 0 50px;
+        }
+        .feature-card-6 {
+            background: white;
+            border-radius: 16px;
+            padding: 26px 22px;
+            box-shadow: 0 4px 18px rgba(0, 0, 0, 0.07);
+            border: 1px solid #eef0f5;
+            transition: transform 0.25s ease, box-shadow 0.25s ease;
+            position: relative;
+            overflow: hidden;
+        }
+        .feature-card-6:hover {
+            transform: translateY(-6px);
+            box-shadow: 0 14px 34px rgba(78, 84, 200, 0.14);
+        }
+        .feature-card-6::before {
+            content: "";
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 4px;
+            background: linear-gradient(90deg, #4e54c8, #8f94fb);
+        }
+        .feature-card-6 .fc-icon {
+            width: 54px;
+            height: 54px;
+            border-radius: 14px;
+            background: linear-gradient(135deg, #4e54c8, #8f94fb);
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+            margin-bottom: 16px;
+            box-shadow: 0 6px 18px rgba(78, 84, 200, 0.3);
+        }
+        .feature-card-6 h3 {
+            font-size: 1.15rem;
+            color: #2d334a;
+            margin-bottom: 8px;
+            font-weight: 700;
+        }
+        .feature-card-6 p {
+            color: #5a6273;
+            font-size: 0.94rem;
+            line-height: 1.6;
+            margin: 0;
+        }
+
+        /* Step Timeline */
+        .step-timeline {
+            position: relative;
+            padding-left: 40px;
+            margin: 30px 0 50px;
+        }
+        .step-timeline::before {
+            content: "";
+            position: absolute;
+            left: 15px; top: 10px; bottom: 10px;
+            width: 3px;
+            background: linear-gradient(180deg, #4e54c8, #8f94fb);
+            border-radius: 3px;
+        }
+        .tl-item {
+            position: relative;
+            margin-bottom: 32px;
+            background: white;
+            border-radius: 14px;
+            padding: 22px 24px 22px 28px;
+            box-shadow: 0 3px 14px rgba(0, 0, 0, 0.06);
+            border: 1px solid #eef0f5;
+        }
+        .tl-item::before {
+            content: attr(data-step);
+            position: absolute;
+            left: -40px;
+            top: 22px;
+            width: 32px; height: 32px;
+            background: linear-gradient(135deg, #4e54c8, #8f94fb);
+            color: white;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 800;
+            font-size: 0.9rem;
+            box-shadow: 0 4px 12px rgba(78, 84, 200, 0.4);
+            border: 3px solid #f5f7fa;
+        }
+        .tl-item h3 {
+            font-size: 1.15rem;
+            color: #2d334a;
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        .tl-item h3 .tl-tag {
+            background: #e7ebff;
+            color: #4e54c8;
+            padding: 3px 12px;
+            border-radius: 20px;
+            font-size: 0.72rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+        }
+        .tl-item p {
+            color: #5a6273;
+            font-size: 0.95rem;
+            line-height: 1.65;
+            margin: 0 0 10px;
+        }
+        .tl-item ul {
+            margin: 8px 0 0 18px;
+            color: #5a6273;
+            font-size: 0.92rem;
+            line-height: 1.7;
+        }
+        .tl-item ul li { margin-bottom: 4px; }
+        .tl-item ul li strong { color: #2d334a; }
+
+        /* Earnings Box */
+        .earnings-box {
+            background: linear-gradient(135deg, #1a1a2e 0%, #0f3460 100%);
+            color: white;
+            border-radius: 20px;
+            padding: 40px 30px;
+            margin: 30px 0 50px;
+            position: relative;
+            overflow: hidden;
+        }
+        .earnings-box::before {
+            content: "💰";
+            position: absolute;
+            font-size: 10rem;
+            opacity: 0.05;
+            right: -20px; bottom: -30px;
+        }
+        .earnings-box h2 {
+            color: #ffd700;
+            font-size: 1.7rem;
+            margin-bottom: 10px;
+            position: relative;
+            z-index: 1;
+        }
+        .earnings-box > p {
+            opacity: 0.9;
+            margin-bottom: 28px;
+            position: relative;
+            z-index: 1;
+            max-width: 700px;
+            line-height: 1.6;
+        }
+        .earn-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 20px;
+            position: relative;
+            z-index: 1;
+        }
+        .earn-card {
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 14px;
+            padding: 22px 20px;
+            backdrop-filter: blur(8px);
+        }
+        .earn-card .earn-icon {
+            font-size: 1.8rem;
+            margin-bottom: 10px;
+            color: #ffd700;
+        }
+        .earn-card h4 { color: white; font-size: 1.05rem; margin-bottom: 6px; }
+        .earn-card p { font-size: 0.86rem; opacity: 0.85; line-height: 1.5; margin: 0; }
+        .earn-card .earn-amount {
+            font-size: 1.4rem;
+            font-weight: 800;
+            color: #20bf6b;
+            margin-top: 8px;
+            display: block;
+        }
+
+        /* Info Section */
+        .info-section {
+            background: white;
+            border-radius: 16px;
+            padding: 30px 28px;
+            margin: 25px 0;
+            box-shadow: 0 3px 14px rgba(0, 0, 0, 0.05);
+            border: 1px solid #eef0f5;
+        }
+        .info-section h2 {
+            color: #4e54c8;
+            font-size: 1.5rem;
+            margin-bottom: 14px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        .info-section h3 {
+            color: #2d334a;
+            font-size: 1.15rem;
+            margin: 18px 0 8px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .info-section p, .info-section li {
+            color: #5a6273;
+            font-size: 0.96rem;
+            line-height: 1.7;
+        }
+        .info-section ul { margin: 8px 0 0 20px; }
+
+        /* Compare Grid */
+        .compare-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin: 25px 0;
+        }
+        .compare-col {
+            background: #f8f9fa;
+            border-radius: 14px;
+            padding: 22px;
+            border: 1px solid #eef0f5;
+        }
+        .compare-col h4 {
+            font-size: 1.05rem;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .compare-col.free-col h4 { color: #20bf6b; }
+        .compare-col.paid-col h4 { color: #ff6b6b; }
+        .compare-col ul { list-style: none; padding: 0; margin: 0; }
+        .compare-col ul li {
+            padding: 7px 0;
+            font-size: 0.9rem;
+            color: #5a6273;
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+        }
+        .compare-col ul li i { margin-top: 4px; flex-shrink: 0; }
+        .compare-col.free-col ul li i { color: #20bf6b; }
+        .compare-col.paid-col ul li i { color: #ff6b6b; }
+
+        /* Ad Network Grid */
+        .network-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 12px;
+            margin: 18px 0 8px;
+        }
+        .network-chip {
+            background: linear-gradient(135deg, #f8f9ff, #f0f4ff);
+            border: 1px solid #dde2f0;
+            border-radius: 12px;
+            padding: 14px 12px;
+            text-align: center;
+            font-size: 0.9rem;
+            font-weight: 700;
+            color: #4e54c8;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            transition: all 0.25s ease;
+        }
+        .network-chip:hover {
+            background: linear-gradient(135deg, #4e54c8, #8f94fb);
+            color: white;
+            border-color: #4e54c8;
+            transform: translateY(-3px);
+            box-shadow: 0 8px 22px rgba(78,84,200,0.25);
+        }
+        .network-chip i { font-size: 1rem; }
+
+        /* Two-Tab Visual */
+        .two-tab-visual {
+            display: grid;
+            grid-template-columns: 1fr auto 1fr;
+            gap: 14px;
+            align-items: center;
+            background: linear-gradient(135deg, #f8f9ff 0%, #eef1ff 100%);
+            border: 2px dashed #4e54c8;
+            border-radius: 16px;
+            padding: 24px 20px;
+            margin: 20px 0;
+        }
+        .tab-preview {
+            background: white;
+            border-radius: 12px;
+            padding: 16px 18px;
+            box-shadow: 0 4px 14px rgba(0,0,0,0.08);
+            text-align: center;
+        }
+        .tab-preview .tab-icon {
+            width: 42px; height: 42px;
+            background: linear-gradient(135deg, #4e54c8, #8f94fb);
+            color: white;
+            border-radius: 12px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.2rem;
+            margin-bottom: 10px;
+        }
+        .tab-preview.tab-secondary .tab-icon {
+            background: linear-gradient(135deg, #ff6b6b, #ff8787);
+        }
+        .tab-preview h5 {
+            font-size: 0.95rem;
+            color: #2d334a;
+            margin-bottom: 4px;
+        }
+        .tab-preview p {
+            font-size: 0.8rem;
+            color: #777;
+            margin: 0;
+            line-height: 1.4;
+        }
+        .two-tab-visual .plus-sign {
+            font-size: 1.8rem;
+            color: #4e54c8;
+            font-weight: 800;
+        }
+
+        /* FAQ */
+        .faq-item {
+            background: white;
+            border: 1px solid #eef0f5;
+            border-radius: 12px;
+            margin-bottom: 12px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+        }
+        .faq-q {
+            padding: 16px 20px;
+            font-weight: 600;
+            color: #2d334a;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: background 0.2s;
+            font-size: 1rem;
+            gap: 10px;
+        }
+        .faq-q:hover { background: #f8f9ff; }
+        .faq-q i {
+            color: #4e54c8;
+            transition: transform 0.3s ease;
+            flex-shrink: 0;
+        }
+        .faq-item.open .faq-q i { transform: rotate(180deg); }
+        .faq-a {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.35s ease, padding 0.3s ease;
+            padding: 0 20px;
+            color: #5a6273;
+            line-height: 1.7;
+            font-size: 0.95rem;
+        }
+        .faq-item.open .faq-a {
+            max-height: 500px;
+            padding: 0 20px 18px;
+        }
+
+        /* CTA Banner */
+        .cta-banner {
+            background: linear-gradient(135deg, #4e54c8, #8f94fb);
+            color: white;
+            border-radius: 20px;
+            padding: 40px 30px;
+            text-align: center;
+            margin: 40px 0;
+            box-shadow: 0 12px 35px rgba(78, 84, 200, 0.3);
+        }
+        .cta-banner h2 { font-size: 1.9rem; margin-bottom: 10px; }
+        .cta-banner p {
+            font-size: 1.05rem;
+            opacity: 0.95;
+            margin-bottom: 25px;
+            max-width: 600px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        .cta-banner .cta-btns {
+            display: flex;
+            gap: 14px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+        .cta-banner .cta-btn {
+            background: white;
+            color: #4e54c8;
+            padding: 14px 30px;
+            border-radius: 40px;
+            font-weight: 700;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            transition: all 0.3s ease;
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
+        }
+        .cta-banner .cta-btn:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 10px 28px rgba(0, 0, 0, 0.25);
+        }
+        .cta-banner .cta-btn.ghost {
+            background: transparent;
+            color: white;
+            border: 2px solid rgba(255, 255, 255, 0.5);
+        }
+        .cta-banner .cta-btn.ghost:hover { background: rgba(255, 255, 255, 0.1); }
+
+        /* Quick Jump */
+        .quick-jump {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            justify-content: center;
+            margin: 20px 0 40px;
+        }
+        .quick-jump a {
+            background: white;
+            color: #4e54c8;
+            text-decoration: none;
+            padding: 9px 20px;
+            border-radius: 30px;
+            font-size: 0.88rem;
+            font-weight: 600;
+            border: 1px solid #dde2f0;
+            transition: all 0.25s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+        }
+        .quick-jump a:hover {
+            background: #4e54c8;
+            color: white;
+            border-color: #4e54c8;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 18px rgba(78, 84, 200, 0.3);
+        }
+
+        /* ============================================================
+           FOOTER
+           ============================================================ */
+        .site-footer, footer {
+            background: #2d334a;
+            color: white;
+            padding: 50px 0 0;
+            margin-top: 60px;
+            border-top: 4px solid #4e54c8;
+        }
+        .footer-container, .footer-grid {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 20px 40px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 30px;
+        }
+        .footer-column h3, .footer-section h3 {
+            color: #8f94fb;
+            margin-bottom: 16px;
+            font-size: 1.1rem;
+            font-weight: 700;
+            letter-spacing: 0.3px;
+            position: relative;
+            padding-bottom: 8px;
+        }
+        .footer-column h3::after, .footer-section h3::after {
+            content: "";
+            position: absolute;
+            left: 0; bottom: 0;
+            width: 40px; height: 3px;
+            background: linear-gradient(90deg, #4e54c8, #8f94fb);
+            border-radius: 3px;
+        }
+        .footer-column p, .footer-section p {
+            color: #b8bfd0;
+            font-size: 0.92rem;
+            line-height: 1.7;
+            margin-bottom: 16px;
+        }
+        .footer-links { list-style: none; padding: 0; margin: 0; }
+        .footer-links li { margin-bottom: 10px; }
+        .footer-links a {
+            color: #b8bfd0;
+            text-decoration: none;
+            font-size: 0.92rem;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .footer-links a::before {
+            content: "›";
+            color: #4e54c8;
+            font-weight: 700;
+            transition: transform 0.25s ease;
+        }
+        .footer-links a:hover { color: #8f94fb; transform: translateX(4px); }
+        .footer-links a:hover::before { transform: translateX(2px); }
+        .social-links { display: flex; gap: 12px; margin-top: 8px; }
+        .social-links a {
+            width: 38px; height: 38px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.08);
+            color: #b8bfd0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-decoration: none;
+            transition: all 0.3s ease;
+            font-size: 0.95rem;
+        }
+        .social-links a:hover {
+            background: linear-gradient(135deg, #4e54c8, #8f94fb);
+            color: white;
+            transform: translateY(-3px);
+            box-shadow: 0 6px 16px rgba(78, 84, 200, 0.4);
+        }
+        .copyright {
+            text-align: center;
+            padding: 22px 20px;
+            border-top: 1px solid rgba(255, 255, 255, 0.08);
+            color: #8a92a6;
+            font-size: 0.88rem;
+            background: rgba(0, 0, 0, 0.15);
+        }
+
+        /* ============================================================
+           RESPONSIVE
+           ============================================================ */
+        @media (max-width: 900px) {
+            .nav-links { gap: 16px; }
+            .nav-links a { font-size: 0.85rem; }
+        }
+        @media (max-width: 768px) {
+            nav {
+                flex-wrap: wrap;
+                justify-content: space-between;
+                padding: 10px 0;
+            }
+            .nav-links {
+                order: 3;
+                width: 100%;
+                justify-content: center;
+                padding-top: 10px;
+                border-top: 1px solid #eef0f5;
+                margin-top: 8px;
+                gap: 14px;
+            }
+            .mobile-toggle { display: flex; }
+            #authSection { margin-left: auto; }
+            #authSection .login-btn, #authSection .cta-button {
+                padding: 6px 14px;
+                font-size: 0.78rem;
+            }
+
+            .hiw-hero { padding: 40px 16px 36px; border-radius: 0 0 20px 20px; }
+            .hiw-hero h1 { font-size: 1.8rem; }
+            .hiw-hero p { font-size: 1rem; }
+            .step-timeline { padding-left: 32px; }
+            .tl-item::before { left: -32px; width: 26px; height: 26px; font-size: 0.78rem; }
+            .tl-item { padding: 18px 18px 18px 20px; }
+            .compare-grid { grid-template-columns: 1fr; }
+            .cta-banner h2 { font-size: 1.5rem; }
+            .cta-banner { padding: 30px 20px; }
+            .earnings-box { padding: 28px 20px; }
+            .info-section { padding: 22px 18px; }
+            .two-tab-visual {
+                grid-template-columns: 1fr;
+                gap: 10px;
+                text-align: center;
+            }
+            .two-tab-visual .plus-sign { font-size: 1.4rem; }
+            .footer-container, .footer-grid {
+                grid-template-columns: 1fr 1fr;
+                gap: 24px;
+            }
+        }
+        @media (max-width: 480px) {
+            .logo img { width: 40px; height: 40px; }
+            .logo span { font-size: 1rem; }
+            .hiw-hero h1 { font-size: 1.5rem; }
+            .hiw-hero .hero-badge { font-size: 0.78rem; padding: 6px 14px; }
+            .feature-card-6 { padding: 20px 18px; }
+            .tl-item h3 { font-size: 1.02rem; }
+            .footer-container, .footer-grid { grid-template-columns: 1fr; }
+            .cta-banner .cta-btn { width: 100%; justify-content: center; }
+            .network-grid { grid-template-columns: 1fr 1fr; }
+        }
+    </style>
 </head>
 <body>
-   <header>
+
+<!-- ============================================================
+     HEADER
+     ============================================================ -->
+<header>
     <div class="container">
         <nav>
-            <div class="logo">
-             <img src="logo.png" alt="Logo" style="width:100px;height:60px;">
+            <a href="index.html" class="logo">
+                <img src="logo.png" alt="ToolsPrompt Logo">
                 <span>ToolsPrompt</span>
-            </div>
+            </a>
             <div class="nav-links">
                 <a href="index.html">Home</a>
                 <a href="promptconverter.html">Prompt Converter</a>
@@ -46,7 +841,6 @@
                 <a href="howitworks.html">How It Works</a>
             </div>
             <div id="authSection">
-                <!-- Will be populated by script.js -->
                 <a href="login.html" class="login-btn">Login</a>
                 <a href="login.html" class="cta-button">Get Started</a>
             </div>
@@ -56,253 +850,901 @@
         </nav>
     </div>
 </header>
-    <!-- How It Works Section -->
-    <section class="how-it-works" id="how-it-works">
-        <div class="container">
-            <div class="section-title">
-                <h2>The Science of Perfect Prompts</h2>
-                <p>Understanding how to communicate effectively with AI systems</p>
+
+<!-- ============================================================
+     HERO
+     ============================================================ -->
+<section class="hiw-hero">
+    <h1><i class="fas fa-cogs"></i> How ToolsPrompt Works</h1>
+    <p>
+        One platform. Everything you need to <strong>create AI content</strong>, <strong>buy & sell prompts</strong>,
+        <strong>build a channel</strong>, and <strong>earn real money</strong> — all from a single dashboard.
+    </p>
+    <div class="hero-badges">
+        <span class="hero-badge"><i class="fas fa-image"></i> AI Image Generation</span>
+        <span class="hero-badge"><i class="fas fa-video"></i> AI Video Generation</span>
+        <span class="hero-badge"><i class="fas fa-store"></i> Prompt Marketplace</span>
+        <span class="hero-badge"><i class="fas fa-tv"></i> Creator Channels</span>
+        <span class="hero-badge"><i class="fas fa-rupee-sign"></i> 80% Seller Payout</span>
+        <span class="hero-badge"><i class="fas fa-bolt"></i> 0% Ad-Network Cut</span>
+    </div>
+</section>
+
+<main class="container">
+
+    <!-- Quick Jump -->
+    <div class="quick-jump">
+        <a href="#overview"><i class="fas fa-compass"></i> Overview</a>
+        <a href="#ai-generation"><i class="fas fa-magic"></i> AI Generation</a>
+        <a href="#marketplace"><i class="fas fa-store"></i> Buy &amp; Sell</a>
+        <a href="#channels"><i class="fas fa-tv"></i> Channels</a>
+        <a href="#earnings"><i class="fas fa-rupee-sign"></i> Earnings</a>
+        <a href="#affiliate"><i class="fas fa-link"></i> Ad Affiliate</a>
+        <a href="#community"><i class="fas fa-users"></i> Community</a>
+        <a href="#referrals"><i class="fas fa-gift"></i> Referrals</a>
+        <a href="#faq"><i class="fas fa-question-circle"></i> FAQ</a>
+    </div>
+
+    <!-- ============================================================
+         SECTION 1 — OVERVIEW
+         ============================================================ -->
+    <section id="overview">
+        <div class="info-section">
+            <h2><i class="fas fa-compass"></i> What Is ToolsPrompt?</h2>
+            <p><strong>ToolsPrompt</strong> is an all-in-one AI prompt marketplace and creation platform. It gives you:</p>
+            <ul>
+                <li><strong>Free AI image &amp; video generators</strong> — create content directly on the platform.</li>
+                <li><strong>A marketplace</strong> — buy and sell high-quality prompts for all major AI tools.</li>
+                <li><strong>Creator channels</strong> — build a public profile, gain subscribers, and showcase your work.</li>
+                <li><strong>Ad-network affiliate monetization</strong> — attach your own Monetag / Adsterra / PropellerAds links and keep 100% of the earnings.</li>
+                <li><strong>Prompt sales &amp; tips</strong> — earn 80% commission on every sale and 85% on every tip.</li>
+                <li><strong>Full payout system</strong> — withdraw your balance via UPI or bank transfer (minimum ₹100).</li>
+            </ul>
+            <p style="margin-top:14px;">
+                Whether you're a <em>prompt engineer</em>, a <em>content creator</em>, an <em>artist</em>, or just someone
+                curious about AI — ToolsPrompt gives you the tools to create, share, and profit.
+            </p>
+        </div>
+
+        <div class="feature-grid-6">
+            <div class="feature-card-6">
+                <div class="fc-icon"><i class="fas fa-magic"></i></div>
+                <h3>Free AI Generation</h3>
+                <p>Generate images and videos from text or reference images. New users get <strong>5 free credits daily</strong> — no credit card required.</p>
             </div>
-            
-            <div class="steps">
-                <div class="step">
-                    <div class="step-number">1</div>
-                    <div class="step-content">
-                        <h3>Precision in Language</h3>
-                        <p>AI models respond best to clear, unambiguous language. Avoid vague terms and instead use specific descriptors. For example, instead of "a beautiful landscape," specify "a serene alpine meadow at sunrise with wildflowers and a crystal-clear mountain stream."</p>
-                        <div class="example-box">
-                            <div class="bad-example">
-                                <h4><i class="fas fa-times-circle"></i> Less Effective</h4>
-                                <p>"a futuristic city"</p>
-                            </div>
-                            <div class="good-example">
-                                <h4><i class="fas fa-check-circle"></i> More Effective</h4>
-                                <p>"A cyberpunk metropolis at night with towering neon-lit skyscrapers, flying vehicles, holographic advertisements, and rain-slicked streets reflecting the colorful lights"</p>
-                            </div>
-                        </div>
-                    </div>
+            <div class="feature-card-6">
+                <div class="fc-icon"><i class="fas fa-store"></i></div>
+                <h3>Prompt Marketplace</h3>
+                <p>Buy proven prompts or list your own. Sellers keep <strong>80% of every sale</strong> — the lowest platform fee around.</p>
+            </div>
+            <div class="feature-card-6">
+                <div class="fc-icon"><i class="fas fa-tv"></i></div>
+                <h3>Creator Channels</h3>
+                <p>Claim your unique <code>@handle</code>, build a following, post community updates, and receive direct support from fans.</p>
+            </div>
+            <div class="feature-card-6">
+                <div class="fc-icon"><i class="fas fa-bolt"></i></div>
+                <h3>Ad Affiliate — 0% Cut</h3>
+                <p>Attach direct links from <strong>Monetag, Adsterra, PropellerAds</strong> and more. Every click opens 2 tabs — you earn 100% of ad revenue.</p>
+            </div>
+            <div class="feature-card-6">
+                <div class="fc-icon"><i class="fas fa-rupee-sign"></i></div>
+                <h3>Instant Payouts</h3>
+                <p>Withdraw your earnings via <strong>UPI or bank transfer</strong> with just ₹100 minimum. Fast, transparent, and secure.</p>
+            </div>
+            <div class="feature-card-6">
+                <div class="fc-icon"><i class="fas fa-users"></i></div>
+                <h3>Live Community</h3>
+                <p>Chat, react, share stickers, and follow other creators in real-time. Build your audience and collaborate.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- ============================================================
+         SECTION 2 — AI GENERATION
+         ============================================================ -->
+    <section id="ai-generation">
+        <div class="info-section">
+            <h2><i class="fas fa-magic"></i> AI Image &amp; Video Generation</h2>
+            <p>
+                ToolsPrompt includes <strong>built-in AI generators</strong> that let you create content without leaving the site.
+                There are four modes — powered by cutting-edge, best-in-class AI engines.
+            </p>
+        </div>
+
+        <div class="step-timeline">
+            <div class="tl-item" data-step="1">
+                <h3>Text → Image <span class="tl-tag">Most Used</span></h3>
+                <p>Type a description and get a high-quality AI image in seconds. Perfect for concept art, social media visuals, thumbnails, and mockups.</p>
+                <ul>
+                    <li><strong>Prompt input:</strong> Be descriptive — lighting, style, mood, subject.</li>
+                    <li><strong>Engine:</strong> Advanced photorealistic AI model.</li>
+                    <li><strong>Cost:</strong> 1 credit per generation.</li>
+                </ul>
+            </div>
+
+            <div class="tl-item" data-step="2">
+                <h3>Image → Image <span class="tl-tag">Transform</span></h3>
+                <p>Upload a reference image, describe how you want it transformed, and the AI will re-imagine it. Great for style transfers, restyling photos, and creating variations.</p>
+                <ul>
+                    <li>Supports JPEG, PNG, WebP.</li>
+                    <li>Upload directly from your device or paste an image URL.</li>
+                </ul>
+            </div>
+
+            <div class="tl-item" data-step="3">
+                <h3>Text → Video <span class="tl-tag">Popular</span></h3>
+                <p>Describe a scene and generate a 3–40 second video. Choose your duration with the slider and let the AI produce motion.</p>
+                <ul>
+                    <li><strong>Duration:</strong> 3s to 40s (1080p for ≤7s, 720p for ≤17s, 480p beyond).</li>
+                    <li><strong>Engine:</strong> Next-gen text-to-video AI with cinematic motion.</li>
+                    <li><strong>Cost:</strong> 1 credit per video task.</li>
+                </ul>
+            </div>
+
+            <div class="tl-item" data-step="4">
+                <h3>Image → Video &amp; Keyframe Mode <span class="tl-tag">Advanced</span></h3>
+                <p>Upload a start image (and optionally an end image) and generate a smooth video transition between them. Ideal for storytelling, product reveals, and before/after animations.</p>
+                <ul>
+                    <li><strong>Single-image mode:</strong> animates one reference image.</li>
+                    <li><strong>Keyframe mode:</strong> uses two images to interpolate motion.</li>
+                    <li><strong>Reference URL mode:</strong> paste a YouTube / TikTok / Instagram link — we extract a thumbnail and animate it.</li>
+                </ul>
+            </div>
+        </div>
+
+        <div class="info-section">
+            <h2><i class="fas fa-coins"></i> How Credits Work</h2>
+            <p>Every AI generation costs <strong>1 credit</strong>. Here's how to get them:</p>
+
+            <div class="compare-grid">
+                <div class="compare-col free-col">
+                    <h4><i class="fas fa-gift"></i> Free Credits</h4>
+                    <ul>
+                        <li><i class="fas fa-check-circle"></i> <strong>5 free credits</strong> every day when logged in</li>
+                        <li><i class="fas fa-check-circle"></i> <strong>3 free guest generations</strong> without login (per day)</li>
+                        <li><i class="fas fa-check-circle"></i> <strong>+5 credits</strong> when you use a friend's referral link</li>
+                        <li><i class="fas fa-check-circle"></i> <strong>+10 credits</strong> for each friend you refer</li>
+                    </ul>
                 </div>
-                
-                <div class="step">
-                    <div class="step-number">2</div>
-                    <div class="step-content">
-                        <h3>Contextual Layering</h3>
-                        <p>Effective prompts layer multiple contextual elements: subject, style, composition, lighting, and mood. Our research shows that prompts with 4-6 descriptive elements generate the most accurate results. Each element should complement the others to create a cohesive vision.</p>
-                        <div class="example-box">
-                            <h4>Prompt Layering Example:</h4>
-                            <ol>
-                                <li><strong>Subject</strong>: A robotic samurai warrior</li>
-                                <li><strong>Setting</strong>: In a neon-lit cyberpunk city at night</li>
-                                <li><strong>Style</strong>: Art by Syd Mead and Blade Runner 2049</li>
-                                <li><strong>Lighting</strong>: Cinematic with strong volumetric rays</li>
-                                <li><strong>Technical</strong>: 8K resolution, aspect ratio 16:9</li>
-                            </ol>
-                        </div>
-                    </div>
-                </div>
-                
-                <div class="step">
-                    <div class="step-number">3</div>
-                    <div class="step-content">
-                        <h3>Technical Specifications</h3>
-                        <p>Include technical parameters when relevant: aspect ratio (--ar), version (--v), style parameters (--style raw), and resolution. These instructions help the AI understand your output requirements beyond the visual description.</p>
-                        <div class="specs-grid">
-                            <div class="spec-card">
-                                <h4>Aspect Ratio</h4>
-                                <p>--ar 16:9</p>
-                                <p>Standard widescreen format</p>
-                            </div>
-                            <div class="spec-card">
-                                <h4>Version</h4>
-                                <p>--v 5</p>
-                                <p>Latest model version</p>
-                            </div>
-                            <div class="spec-card">
-                                <h4>Style</h4>
-                                <p>--style raw</p>
-                                <p>Less interpretive output</p>
-                            </div>
-                            <div class="spec-card">
-                                <h4>Quality</h4>
-                                <p>--q 2</p>
-                                <p>Higher quality rendering</p>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                
-                <div class="step">
-                    <div class="step-number">4</div>
-                    <div class="step-content">
-                        <h3>Reference Mastery</h3>
-                        <p>Referencing known artists, art movements, or photographic styles gives the AI a rich visual vocabulary to draw from. For example, "in the style of Van Gogh's Starry Night" provides immediate stylistic context that would require paragraphs to describe otherwise.</p>
-                        <div class="reference-grid">
-                            <div class="reference-card">
-                                <h4>Artistic Styles</h4>
-                                <ul>
-                                    <li>Impressionism</li>
-                                    <li>Surrealism</li>
-                                    <li>Art Nouveau</li>
-                                    <li>Ukiyo-e</li>
-                                </ul>
-                            </div>
-                            <div class="reference-card">
-                                <h4>Photographic Styles</h4>
-                                <ul>
-                                    <li>Film noir</li>
-                                    <li>Minimalist</li>
-                                    <li>Long exposure</li>
-                                    <li>Macro photography</li>
-                                </ul>
-                            </div>
-                            <div class="reference-card">
-                                <h4>Cinematic References</h4>
-                                <ul>
-                                    <li>Blade Runner 2049</li>
-                                    <li>Studio Ghibli</li>
-                                    <li>Wes Anderson</li>
-                                    <li>Christopher Nolan</li>
-                                </ul>
-                            </div>
-                        </div>
-                    </div>
+                <div class="compare-col paid-col">
+                    <h4><i class="fas fa-gem"></i> Top-Up Credits</h4>
+                    <ul>
+                        <li><i class="fas fa-check-circle"></i> <strong>50 credits for ₹20</strong> — one-time purchase</li>
+                        <li><i class="fas fa-check-circle"></i> Instant delivery after payment</li>
+                        <li><i class="fas fa-check-circle"></i> Pay via UPI, cards, net banking (secure gateway)</li>
+                        <li><i class="fas fa-check-circle"></i> Credits never expire</li>
+                    </ul>
                 </div>
             </div>
         </div>
     </section>
 
-    <!-- Best Practices Section -->
-    <section class="best-practices">
-        <div class="container">
-            <div class="section-title">
-                <h2>Prompt Engineering Best Practices</h2>
-                <p>Follow these guidelines to maximize your results with AI systems</p>
+    <!-- ============================================================
+         SECTION 3 — MARKETPLACE
+         ============================================================ -->
+    <section id="marketplace">
+        <div class="info-section">
+            <h2><i class="fas fa-store"></i> The Prompt Marketplace — Buy &amp; Sell</h2>
+            <p>
+                ToolsPrompt is a true two-sided marketplace. <strong>Buyers</strong> get proven, ready-to-use prompts.
+                <strong>Sellers</strong> earn real income from their creativity. Every prompt is either <strong>free</strong> or <strong>paid</strong> — the choice is yours.
+            </p>
+        </div>
+
+        <div class="step-timeline">
+            <div class="tl-item" data-step="1">
+                <h3>For Buyers <span class="tl-tag">Purchase</span></h3>
+                <p>Browse thousands of prompts across categories: art, photography, design, writing, video reels, and more. Filter by <em>free</em> or <em>paid</em>, search by keyword, and preview before you buy.</p>
+                <ul>
+                    <li>Free prompts → <strong>click "Copy"</strong> and paste into your AI tool.</li>
+                    <li>Paid prompts → <strong>pay securely</strong> and instantly unlock the full prompt text.</li>
+                    <li>All purchases are saved to your <strong>Dashboard → My Purchases</strong> forever.</li>
+                    <li>Re-download or re-copy your purchased prompt text anytime.</li>
+                </ul>
             </div>
-            
-            <div class="practices-grid">
-                <div class="practice-card">
-                    <div class="practice-icon">
-                        <i class="fas fa-swatchbook"></i>
-                    </div>
-                    <h3>Iterative Refinement</h3>
-                    <p>Start with a basic concept and progressively add details through multiple iterations. Analyze each output to understand what works and what doesn't.</p>
+
+            <div class="tl-item" data-step="2">
+                <h3>For Sellers <span class="tl-tag">Upload</span></h3>
+                <p>Upload your prompt, attach a demo image or video, set a price (or make it free), and start earning. The upload form is fast and supports custom thumbnails for video reels.</p>
+                <ul>
+                    <li><strong>Title + Prompt Text</strong> — what buyers will receive.</li>
+                    <li><strong>Demo Image/Video</strong> — JPG, PNG, WebP, MP4, WebM (up to 100 MB).</li>
+                    <li><strong>Custom Thumbnail</strong> — for video reels (recommended 1280×720).</li>
+                    <li><strong>Category</strong> — Art, Photography, Design, Writing, Video, Other.</li>
+                    <li><strong>Pricing</strong> — Free or Paid (minimum ₹10, you set the price).</li>
+                    <li><strong>About Description</strong> — optional, explains what the prompt does.</li>
+                    <li><strong>Customize Prompt Page</strong> — optional advanced fields (comparison table, top tools, how-to steps, expert tips).</li>
+                </ul>
+            </div>
+
+            <div class="tl-item" data-step="3">
+                <h3>Seller Commission — 80% <span class="tl-tag">Best Rate</span></h3>
+                <p>ToolsPrompt charges the lowest commission in the market. You keep <strong>80% of every sale</strong>. The platform fee is just 20%, which covers payment processing, hosting, and marketing.</p>
+                <ul>
+                    <li><strong>Example:</strong> Sell a prompt for ₹100 → you earn <strong>₹80</strong>.</li>
+                    <li>Earnings appear instantly in your dashboard.</li>
+                    <li>Withdraw anytime once your available balance reaches ₹100.</li>
+                </ul>
+            </div>
+
+            <div class="tl-item" data-step="4">
+                <h3>Product Page Customization <span class="tl-tag">Pro Feature</span></h3>
+                <p>When you upload a prompt, you can optionally customize what appears on its public page. Leave fields blank and the platform auto-generates them using AI.</p>
+                <ul>
+                    <li><strong>AI Platform Comparison</strong> — HTML table (auto-generated if blank)</li>
+                    <li><strong>Top AI Tools</strong> — one per line: <code>Name | Description | Best For | Price</code></li>
+                    <li><strong>Model-Specific Tips</strong> — custom HTML (auto-generated if blank)</li>
+                    <li><strong>How-To Steps</strong> — one step per line, becomes a numbered guide</li>
+                    <li><strong>Expert Tips / Usage Tips / Optimization Tips</strong> — one per line</li>
+                </ul>
+                <p style="margin-top:8px; font-size:0.88rem;">
+                    <i class="fas fa-lightbulb" style="color:#ffd700;"></i>
+                    You can also <strong>edit these later</strong> from the prompt page itself (if you're the owner).
+                </p>
+            </div>
+        </div>
+    </section>
+
+    <!-- ============================================================
+         SECTION 4 — CHANNELS
+         ============================================================ -->
+    <section id="channels">
+        <div class="info-section">
+            <h2><i class="fas fa-tv"></i> Creator Channels — Build Your Brand</h2>
+            <p>
+                Every creator on ToolsPrompt can claim a <strong>free public channel</strong> — a profile page that showcases all
+                your prompts, lets you post community updates, and gives fans a way to support you directly.
+            </p>
+        </div>
+
+        <div class="step-timeline">
+            <div class="tl-item" data-step="1">
+                <h3>Claim Your Unique @Handle <span class="tl-tag">Free</span></h3>
+                <p>Pick a unique handle like <code>@aimastermind</code>. Your channel URL becomes <code>toolsprompt.com/channel/@aimastermind</code>.</p>
+                <ul>
+                    <li>Handles are <strong>first-come, first-served</strong> — claim yours early.</li>
+                    <li>Custom URL support — set your own vanity URL.</li>
+                    <li>Upload an avatar and banner to brand your channel.</li>
+                    <li>Handles <strong>cannot be changed</strong> after creation (URL stability).</li>
+                </ul>
+            </div>
+
+            <div class="tl-item" data-step="2">
+                <h3>Showcase Your Prompts <span class="tl-tag">Auto</span></h3>
+                <p>All your uploaded prompts automatically appear on your channel — no extra steps. Each card shows the thumbnail, title, views, likes, and price badge.</p>
+                <ul>
+                    <li>Free and paid prompts both display.</li>
+                    <li>Video reels show a "Reel" badge and play in the shorts player.</li>
+                    <li>Visitors can browse your channel and buy your prompts.</li>
+                </ul>
+            </div>
+
+            <div class="tl-item" data-step="3">
+                <h3>Gain Subscribers <span class="tl-tag">Grow</span></h3>
+                <p>Visitors can subscribe to your channel with one click. Subscribers see your new uploads and community posts.</p>
+                <ul>
+                    <li>Subscribe button appears on every prompt card.</li>
+                    <li>Live subscriber count displayed on your channel page.</li>
+                    <li>Subscriptions are stored per-user (login required).</li>
+                </ul>
+            </div>
+
+            <div class="tl-item" data-step="4">
+                <h3>Community Posts <span class="tl-tag">Owner Only</span></h3>
+                <p>Post text, images, and prompt updates to your channel's community tab. Fans can react with emojis and comment.</p>
+                <ul>
+                    <li><strong>Text posts</strong> — share news, tips, or behind-the-scenes.</li>
+                    <li><strong>Image posts</strong> — upload a JPEG, PNG, WebP, or GIF (up to 10 MB).</li>
+                    <li><strong>Prompt posts</strong> — paste an AI prompt that visitors can copy with one click.</li>
+                    <li><strong>Reactions</strong> — 👍 ❤️ 🔥 😂 😮</li>
+                    <li><strong>Comments</strong> — logged-in users can reply (with avatars and timestamps).</li>
+                </ul>
+            </div>
+
+            <div class="tl-item" data-step="5">
+                <h3>Receive Direct Support <span class="tl-tag">Tips</span></h3>
+                <p>Fans can send you tips directly through your channel page via our secure payment gateway. You receive <strong>85% of every tip</strong> (15% platform fee).</p>
+                <ul>
+                    <li>Supporters can choose preset amounts (₹10, ₹50, ₹100, ₹200, ₹500) or a custom amount.</li>
+                    <li>Optional message attached to each tip.</li>
+                    <li>Anonymous support option available.</li>
+                    <li>Top supporters are displayed on your channel page.</li>
+                </ul>
+            </div>
+        </div>
+
+        <div class="info-section">
+            <h3><i class="fas fa-star" style="color:#ffd700;"></i> Channel Page Structure</h3>
+            <p>Each channel page has three tabs:</p>
+            <ul>
+                <li><strong>Prompts</strong> — a grid of all your uploaded prompts (images and video reels).</li>
+                <li><strong>Community</strong> — your posts, reactions, and comments (owner can post, everyone can engage).</li>
+                <li><strong>About</strong> — your channel description, creation date, subscriber count, and top supporters.</li>
+            </ul>
+            <p style="margin-top:10px;">
+                Channel owners see a <strong>"Manage Channel"</strong> button and a <strong>"Create Community Post"</strong> button.
+                Visitors see a <strong>Subscribe</strong> button and a <strong>Support</strong> button.
+            </p>
+        </div>
+    </section>
+
+    <!-- ============================================================
+         SECTION 5 — EARNINGS
+         ============================================================ -->
+    <section id="earnings">
+        <div class="earnings-box">
+            <h2>💸 How You Earn on ToolsPrompt</h2>
+            <p>Multiple income streams, one dashboard. Here's exactly how creators make money:</p>
+
+            <div class="earn-grid">
+                <div class="earn-card">
+                    <div class="earn-icon"><i class="fas fa-store"></i></div>
+                    <h4>Prompt Sales</h4>
+                    <p>Set any price (min ₹10). You keep 80% of every sale, paid instantly to your balance.</p>
+                    <span class="earn-amount">80% commission</span>
                 </div>
-                
-                <div class="practice-card">
-                    <div class="practice-icon">
-                        <i class="fas fa-balance-scale"></i>
-                    </div>
-                    <h3>Balance Specificity & Flexibility</h3>
-                    <p>Provide enough detail to guide the AI but leave room for creative interpretation. Overly prescriptive prompts can limit surprising innovations.</p>
+                <div class="earn-card">
+                    <div class="earn-icon"><i class="fas fa-bolt"></i></div>
+                    <h4>Ad-Network Affiliates</h4>
+                    <p>Attach Monetag, Adsterra, PropellerAds links. Every click opens 2 tabs. You keep 100%.</p>
+                    <span class="earn-amount">0% platform cut</span>
                 </div>
-                
-                <div class="practice-card">
-                    <div class="practice-icon">
-                        <i class="fas fa-book"></i>
-                    </div>
-                    <h3>Maintain a Prompt Library</h3>
-                    <p>Document successful prompts with their outputs and parameters. This creates a valuable knowledge base for future projects.</p>
+                <div class="earn-card">
+                    <div class="earn-icon"><i class="fas fa-heart"></i></div>
+                    <h4>Channel Support Tips</h4>
+                    <p>Fans tip you directly. No minimum, no maximum. You keep 85% of every tip.</p>
+                    <span class="earn-amount">85% per tip</span>
                 </div>
-                
-                <div class="practice-card">
-                    <div class="practice-icon">
-                        <i class="fas fa-random"></i>
-                    </div>
-                    <h3>Experiment with Variations</h3>
-                    <p>Generate multiple versions of your prompt with slight modifications to explore different creative possibilities.</p>
+                <div class="earn-card">
+                    <div class="earn-icon"><i class="fas fa-link"></i></div>
+                    <h4>Product Affiliates</h4>
+                    <p>Promote SaaS, courses, tools — earn commissions on every sale driven from your page.</p>
+                    <span class="earn-amount">Unlimited</span>
+                </div>
+                <div class="earn-card">
+                    <div class="earn-icon"><i class="fas fa-users"></i></div>
+                    <h4>Referral Bonuses</h4>
+                    <p>Invite friends. You get 10 credits per signup; they get 5. Credits can be used for AI generation.</p>
+                    <span class="earn-amount">+10 credits</span>
+                </div>
+                <div class="earn-card">
+                    <div class="earn-icon"><i class="fas fa-gem"></i></div>
+                    <h4>Free or Paid — Your Choice</h4>
+                    <p>Free prompts still earn via ad affiliates. Paid prompts add direct sales. Both are profitable.</p>
+                    <span class="earn-amount">Always earning</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="info-section">
+            <h2><i class="fas fa-wallet"></i> Getting Paid — Step by Step</h2>
+
+            <div class="step-timeline" style="margin-top:20px;">
+                <div class="tl-item" data-step="1">
+                    <h3>Reach ₹100 Available Balance</h3>
+                    <p>Your available balance = total earnings − total already paid out. Once it hits ₹100, you can request a payout.</p>
+                </div>
+
+                <div class="tl-item" data-step="2">
+                    <h3>Complete Seller Info</h3>
+                    <p>Add your payout details in <strong>Dashboard → Update Seller Info</strong>:</p>
+                    <ul>
+                        <li>Full name</li>
+                        <li>Email address</li>
+                        <li>UPI ID (e.g. <code>yourname@okhdfcbank</code>) <em>or</em> bank account details</li>
+                        <li>Bank account number, IFSC code, bank name (if using bank transfer)</li>
+                        <li>PAN (optional, for larger withdrawals)</li>
+                    </ul>
+                </div>
+
+                <div class="tl-item" data-step="3">
+                    <h3>Request Payout</h3>
+                    <p>Click <strong>"Request Payout"</strong> in the dashboard. Enter the amount (minimum ₹100). Your request is submitted for admin review.</p>
+                </div>
+
+                <div class="tl-item" data-step="4">
+                    <h3>Admin Processes the Transfer</h3>
+                    <p>Our team verifies your details and sends the money to your UPI ID or bank account. You'll see the status change to <strong>"paid"</strong> in your payout history with a transaction ID.</p>
+                </div>
+
+                <div class="tl-item" data-step="5">
+                    <h3>Track Everything</h3>
+                    <p>Your dashboard shows:</p>
+                    <ul>
+                        <li><strong>Available Balance</strong> — ready for payout</li>
+                        <li><strong>Total Paid Out</strong> — all-time withdrawals</li>
+                        <li><strong>Pending Requests</strong> — awaiting approval</li>
+                        <li><strong>Payout History</strong> — full table with dates, amounts, and transaction IDs</li>
+                    </ul>
                 </div>
             </div>
         </div>
     </section>
 
-    <!-- Footer -->
-    <footer>
-        <div class="container">
-            <div class="footer-grid">
-                <div class="footer-column">
-                    <h3>ToolsPrompt</h3>
-                    <p>Master the art of AI communication with our advanced prompt engineering platform.</p>
-                    <div class="social-links">
-                        <a href="#"><i class="fab fa-twitter"></i></a>
-                        <a href="#"><i class="fab fa-instagram"></i></a>
-                        <a href="#"><i class="fab fa-discord"></i></a>
-                        <a href="#"><i class="fab fa-linkedin"></i></a>
-                    </div>
-                </div>
-                
-                <div class="footer-column">
-                    <h3>Resources</h3>
-                    <ul class="footer-links">
-                        <li><a href="#">Prompt Library</a></li>
-                        <li><a href="#">Tutorials</a></li>
-                        <li><a href="blog.html">Blog</a></li>
-                        <li><a href="#">API Documentation</a></li>
-                        <li><a href="#">Community Forum</a></li>
-                    </ul>
-                </div>
-                
-                <div class="footer-column">
-                    <h3>Company</h3>
-                    <ul class="footer-links">
-                        <li><a href="#">About Us</a></li>
-                        <li><a href="#">Careers</a></li>
-                        <li><a href="#">Press</a></li>
-                        <li><a href="#">Contact</a></li>
-                        <li><a href="#">Partnerships</a></li>
-                    </ul>
-                </div>
-                
-                <div class="footer-column">
-                    <h3>Legal</h3>
-                    <ul class="footer-links">
-                        <li><a href="tos.html">Terms of Service</a></li>
-                        <li><a href="privacy.html">Privacy Policy</a></li>
-                        <li><a href="copyright.html">Copyright</a></li>
-                        <li><a href="cookies-ethics.html">Cookies</a></li>
-                        <li><a href="cookies-ethics.html">AI Ethics</a></li>
-                    </ul>
-                </div>
-            </div>
-            
-            <div class="copyright">
-                &copy; 2023 ToolsPrompt.com. All rights reserved. AI-generated content is subject to respective platform terms.
+    <!-- ============================================================
+         SECTION 6 — AFFILIATE (AD NETWORK + PRODUCT)
+         ============================================================ -->
+    <section id="affiliate">
+        <div class="info-section">
+            <h2><i class="fas fa-bolt"></i> Ad-Network Affiliates — Earn 100%, Keep 100%</h2>
+            <p>
+                ToolsPrompt's most powerful monetization feature: attach your <strong>own direct ad-network links</strong>
+                (Monetag, Adsterra, PropellerAds, PopAds, and more) to your prompt pages. When a visitor clicks
+                an affiliate card, <strong>two tabs open</strong> — the ad network's landing page and your prompt page.
+                You keep <strong>100% of the ad-network earnings</strong>. ToolsPrompt takes <strong>0% cut</strong>.
+            </p>
+
+            <div class="info-banner" style="background: linear-gradient(135deg, #fff8e1, #fff3c4); border-left: 5px solid #ffd700; border-radius: 12px; padding: 20px 22px; margin: 22px 0;">
+                <h4 style="color: #b8860b; font-size: 1.05rem; margin-bottom: 8px; display: flex; align-items: center; gap: 8px;">
+                    <i class="fas fa-star"></i> Why This Beats Everything Else
+                </h4>
+                <p style="color: #6b5b1a; font-size: 0.94rem; line-height: 1.65; margin: 0;">
+                    <strong>Free prompts become revenue machines.</strong> Even if a visitor never buys anything, they still
+                    click your affiliate card → you still get paid by the ad network. Combine paid prompts + ad affiliates
+                    + product affiliates for maximum income.
+                </p>
             </div>
         </div>
-    </footer>
 
-    <script src="script.js"></script>
-<!-- Cookie Consent Banner -->
+        <!-- Two-Tab Visual -->
+        <div class="info-section" style="padding: 28px 24px;">
+            <h3 style="color: #4e54c8; font-size: 1.15rem; margin-bottom: 16px;">
+                <i class="fas fa-external-link-alt"></i> How the 2-Tab Click Works
+            </h3>
+
+            <div class="two-tab-visual">
+                <div class="tab-preview">
+                    <div class="tab-icon"><i class="fas fa-bolt"></i></div>
+                    <h5>Tab 1 — Primary URL</h5>
+                    <p>Your ad-network direct link (Monetag, Adsterra, etc.) opens here. This is where you earn.</p>
+                </div>
+                <div class="plus-sign"><i class="fas fa-plus"></i></div>
+                <div class="tab-preview tab-secondary">
+                    <div class="tab-icon"><i class="fas fa-file-alt"></i></div>
+                    <h5>Tab 2 — Secondary URL</h5>
+                    <p>Your prompt page or product page opens here. Visitor can buy, browse, or convert.</p>
+                </div>
+            </div>
+
+            <p style="color: #5a6273; font-size: 0.94rem; line-height: 1.7; margin-top: 14px; text-align: center;">
+                Both tabs open simultaneously the moment the visitor clicks your affiliate card.
+                <strong>You earn from the ad network — ToolsPrompt never touches it.</strong>
+            </p>
+        </div>
+
+        <!-- Setup Steps -->
+        <div class="step-timeline">
+            <div class="tl-item" data-step="1">
+                <h3>Get Your Direct Link from Any Ad Network <span class="tl-tag">Step 1</span></h3>
+                <p>Sign up at a supported ad network and copy your <strong>direct link</strong> (sometimes called a "SmartLink" or "Direct Link").</p>
+                <p>Supported networks include (but are not limited to):</p>
+                <div class="network-grid">
+                    <div class="network-chip"><i class="fas fa-bolt"></i> Monetag</div>
+                    <div class="network-chip"><i class="fas fa-bolt"></i> Adsterra</div>
+                    <div class="network-chip"><i class="fas fa-bolt"></i> PropellerAds</div>
+                    <div class="network-chip"><i class="fas fa-bolt"></i> PopAds</div>
+                    <div class="network-chip"><i class="fas fa-bolt"></i> HilltopAds</div>
+                    <div class="network-chip"><i class="fas fa-bolt"></i> AdMaven</div>
+                    <div class="network-chip"><i class="fas fa-bolt"></i> Clickadu</div>
+                    <div class="network-chip"><i class="fas fa-bolt"></i> Any Network</div>
+                </div>
+            </div>
+
+            <div class="tl-item" data-step="2">
+                <h3>Add It to the Affiliate Manager <span class="tl-tag">Step 2</span></h3>
+                <p>Open <code>/affiliate.html</code> from your dashboard. You'll see the affiliate form with two URL fields:</p>
+                <ul>
+                    <li><strong>Primary URL (Ad Network):</strong> Paste your direct ad-network link here. This opens in <em>Tab 1</em>.</li>
+                    <li><strong>Secondary URL (Prompt / Product):</strong> Paste your prompt page URL — for example <code>toolsprompt.com/prompt/your-prompt-id</code>. This opens in <em>Tab 2</em>.</li>
+                    <li><strong>Card Title:</strong> A catchy headline (max 80 chars).</li>
+                    <li><strong>Image URL:</strong> Optional thumbnail (recommended 400×400 px).</li>
+                    <li><strong>Description:</strong> A short, punchy line (max 200 chars).</li>
+                </ul>
+                <p style="margin-top:10px;">
+                    <i class="fas fa-eye" style="color:#4e54c8;"></i>
+                    You'll see a <strong>live preview</strong> of your affiliate card as you type — so you know exactly how it will look on the prompt page.
+                </p>
+            </div>
+
+            <div class="tl-item" data-step="3">
+                <h3>Automatic Display on Your Prompt Pages <span class="tl-tag">Step 3</span></h3>
+                <p>All your affiliate links are automatically distributed across the prompt pages you've uploaded. The system rotates them so visitors see variety.</p>
+                <ul>
+                    <li>Up to <strong>3 affiliate cards</strong> shown per prompt page.</li>
+                    <li>Cards are randomly rotated across your prompts.</li>
+                    <li>Works on both free and paid prompts.</li>
+                    <li>Each card displays a <strong>"2 tabs"</strong> badge so visitors know what to expect.</li>
+                </ul>
+            </div>
+
+            <div class="tl-item" data-step="4">
+                <h3>Visitor Clicks → You Earn <span class="tl-tag">Step 4</span></h3>
+                <p>The moment a visitor clicks the affiliate card, <strong>both URLs open in new tabs</strong>. Your ad-network link fires and you earn based on your network's payout model.</p>
+                <ul>
+                    <li><strong>CPM / CPC / CPA:</strong> depends on the network and offer.</li>
+                    <li><strong>100% of earnings</strong> go to you — ToolsPrompt takes zero commission from ad-network revenue.</li>
+                    <li>Track your earnings directly in your ad-network dashboard.</li>
+                </ul>
+            </div>
+
+            <div class="tl-item" data-step="5">
+                <h3>Product Affiliates Too <span class="tl-tag">Bonus</span></h3>
+                <p>Not using an ad network? You can also use the same affiliate system to promote <strong>products</strong> — SaaS tools, courses, gadgets, or anything with an affiliate program.</p>
+                <ul>
+                    <li>Primary URL = your affiliate product link.</li>
+                    <li>Secondary URL = your prompt page (so visitors can still engage with your content).</li>
+                    <li>Earn commissions when visitors purchase from the affiliate partner.</li>
+                    <li>Combine multiple product affiliates + ad-network links for maximum revenue.</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- Benefits grid -->
+        <div class="info-section">
+            <h2><i class="fas fa-check-double"></i> Affiliate Feature Highlights</h2>
+            <div class="compare-grid">
+                <div class="compare-col free-col">
+                    <h4><i class="fas fa-bolt"></i> Ad-Network Affiliates</h4>
+                    <ul>
+                        <li><i class="fas fa-check-circle"></i> <strong>0% platform cut</strong> — keep 100% of ad revenue</li>
+                        <li><i class="fas fa-check-circle"></i> <strong>2 tabs open</strong> per click (ad + prompt page)</li>
+                        <li><i class="fas fa-check-circle"></i> Works with <strong>any</strong> ad network</li>
+                        <li><i class="fas fa-check-circle"></i> Monetize <strong>free prompts</strong> — no sale needed</li>
+                        <li><i class="fas fa-check-circle"></i> <strong>Unlimited</strong> affiliate links</li>
+                        <li><i class="fas fa-check-circle"></i> Up to <strong>3 cards per prompt page</strong> (rotating)</li>
+                    </ul>
+                </div>
+                <div class="compare-col paid-col">
+                    <h4><i class="fas fa-shopping-bag"></i> Product Affiliates</h4>
+                    <ul>
+                        <li><i class="fas fa-check-circle"></i> Promote <strong>any product</strong> with an affiliate program</li>
+                        <li><i class="fas fa-check-circle"></i> Same <strong>2-tab</strong> click behavior</li>
+                        <li><i class="fas fa-check-circle"></i> Combine with ad-network links in the same account</li>
+                        <li><i class="fas fa-check-circle"></i> Live preview shows how the card looks</li>
+                        <li><i class="fas fa-check-circle"></i> Full dashboard with edit / delete controls</li>
+                        <li><i class="fas fa-check-circle"></i> Works on <strong>all</strong> your uploaded prompts</li>
+                    </ul>
+                </div>
+            </div>
+
+            <h3><i class="fas fa-map-signs" style="color:#4e54c8;"></i> Where to Manage Your Affiliates</h3>
+            <p>
+                Visit <code>/affiliate.html</code> (or click <strong>Affiliate</strong> in your dashboard) to:
+            </p>
+            <ul>
+                <li>Add new affiliate links (with live preview).</li>
+                <li>View all your existing links with their Primary and Secondary URLs.</li>
+                <li>Delete any link you no longer want.</li>
+                <li>See a list of supported ad networks.</li>
+                <li>Read a quick refresher on how the 2-tab system works.</li>
+            </ul>
+
+            <h3><i class="fas fa-shield-alt" style="color:#4e54c8;"></i> Why 2 Tabs Instead of 1?</h3>
+            <p>
+                Ad networks often require their landing page to open in a new tab so it isn't blocked by browser pop-up
+                rules. At the same time, we want your visitor to stay connected to your prompt — so they can still buy
+                your prompt after the ad loads. That's why both open simultaneously:
+            </p>
+            <ul>
+                <li><strong>Tab 1 (Ad Network):</strong> fires the ad click → you get paid.</li>
+                <li><strong>Tab 2 (Prompt Page):</strong> keeps your content one click away → more chances to sell.</li>
+            </ul>
+            <p style="margin-top:10px;">
+                Both tabs open from a single user click, which is the most reliable way to avoid pop-up blockers.
+            </p>
+        </div>
+    </section>
+
+    <!-- ============================================================
+         SECTION 7 — COMMUNITY
+         ============================================================ -->
+    <section id="community">
+        <div class="info-section">
+            <h2><i class="fas fa-users"></i> Community &amp; Social Features</h2>
+            <p>ToolsPrompt isn't just a marketplace — it's a community. Here's what you can do:</p>
+
+            <h3><i class="fas fa-comments"></i> Live Chat</h3>
+            <ul>
+                <li>Real-time chat available from any prompt page (the floating panel on the right).</li>
+                <li>Send text messages, reply to specific messages, and use emoji reactions (❤️ 😂 😮 😢 😡 👍).</li>
+                <li>Send animated stickers (😊 😂 ❤️ 🔥 👍 🎉 💯 🤩).</li>
+                <li><strong>No login required</strong> — guests can chat too.</li>
+            </ul>
+
+            <h3><i class="fas fa-share-alt"></i> Social Sharing</h3>
+            <ul>
+                <li>Share prompts to Twitter, Facebook, WhatsApp, and more.</li>
+                <li>Native share sheet on mobile devices.</li>
+                <li>Auto-copies link if native share is unavailable.</li>
+            </ul>
+
+            <h3><i class="fas fa-heart"></i> Engagement Features</h3>
+            <ul>
+                <li><strong>Like</strong> prompts — builds popularity score.</li>
+                <li><strong>View counter</strong> — tracks every page visit.</li>
+                <li><strong>Copy tracker</strong> — counts every prompt copy.</li>
+                <li><strong>Comments</strong> — threaded comments with like buttons.</li>
+                <li><strong>Reuse</strong> — copy a prompt directly into the AI generator bar.</li>
+            </ul>
+
+            <h3><i class="fas fa-mobile-alt"></i> PWA &amp; Mobile Features</h3>
+            <ul>
+                <li>Installable as a Progressive Web App (PWA).</li>
+                <li>Push notifications for replies, tips, and new followers.</li>
+                <li>Mobile-optimized interface with bottom navigation.</li>
+                <li>Floating app download button for Android APK.</li>
+            </ul>
+        </div>
+    </section>
+
+    <!-- ============================================================
+         SECTION 8 — REFERRALS
+         ============================================================ -->
+    <section id="referrals">
+        <div class="info-section">
+            <h2><i class="fas fa-gift"></i> Referral Program — Earn Free Credits</h2>
+            <p>Love ToolsPrompt? Share it with friends and earn <strong>free credits</strong> for AI generation.</p>
+
+            <div class="compare-grid">
+                <div class="compare-col free-col">
+                    <h4><i class="fas fa-user-plus"></i> You Get</h4>
+                    <ul>
+                        <li><i class="fas fa-check-circle"></i> <strong>10 credits</strong> per successful referral</li>
+                        <li><i class="fas fa-check-circle"></i> Credits added instantly when your friend signs up</li>
+                        <li><i class="fas fa-check-circle"></i> Track all referrals in your dashboard</li>
+                    </ul>
+                </div>
+                <div class="compare-col paid-col">
+                    <h4><i class="fas fa-user-check"></i> Your Friend Gets</h4>
+                    <ul>
+                        <li><i class="fas fa-check-circle"></i> <strong>5 free credits</strong> on signup via your link</li>
+                        <li><i class="fas fa-check-circle"></i> Plus their daily 5 free credits</li>
+                        <li><i class="fas fa-check-circle"></i> Full access to all features immediately</li>
+                    </ul>
+                </div>
+            </div>
+
+            <h3>How to Get Your Referral Link</h3>
+            <ul>
+                <li>Log in to ToolsPrompt.</li>
+                <li>Go to your <strong>Dashboard</strong>.</li>
+                <li>Find the <strong>"Your Referral Link"</strong> card.</li>
+                <li>Click <strong>"Copy Link"</strong> and share it anywhere.</li>
+                <li>Each signup through your link = 10 credits for you, 5 for them.</li>
+            </ul>
+            <p style="margin-top:10px;">
+                <i class="fas fa-info-circle" style="color:#4e54c8;"></i>
+                Your referral link looks like: <code>toolsprompt.com/login.html?ref=ABC123</code>
+            </p>
+        </div>
+    </section>
+
+    <!-- ============================================================
+         SECTION 9 — FAQ
+         ============================================================ -->
+    <section id="faq">
+        <div class="info-section">
+            <h2><i class="fas fa-question-circle"></i> Frequently Asked Questions</h2>
+        </div>
+
+        <div class="faq-item">
+            <div class="faq-q">Is ToolsPrompt free to use? <i class="fas fa-chevron-down"></i></div>
+            <div class="faq-a">
+                <p>Yes! You get <strong>5 free credits every day</strong> (when logged in) and <strong>3 free guest generations</strong> per day without login. You can buy and sell prompts, create a channel, add affiliate links, and use the community features — all free. Paid features (like buying premium prompts or topping up credits) are optional.</p>
+            </div>
+        </div>
+
+        <div class="faq-item">
+            <div class="faq-q">How much can I earn as a seller? <i class="fas fa-chevron-down"></i></div>
+            <div class="faq-a">
+                <p>Unlimited. You keep <strong>80% of every prompt sale</strong>, <strong>85% of every channel tip</strong>, and <strong>100% of all ad-network affiliate earnings</strong>. Popular creators earn thousands of rupees per month. There's no cap on how much you can earn.</p>
+            </div>
+        </div>
+
+        <div class="faq-item">
+            <div class="faq-q">How do the ad-network affiliate links work? <i class="fas fa-chevron-down"></i></div>
+            <div class="faq-a">
+                <p>Go to <code>/affiliate.html</code>. In the form, paste your <strong>Primary URL</strong> (your ad-network direct link — Monetag, Adsterra, PropellerAds, etc.) and your <strong>Secondary URL</strong> (your prompt page URL). When a visitor clicks the affiliate card on your prompt page, <strong>both URLs open in 2 new tabs</strong> — the ad network loads in Tab 1, your prompt page loads in Tab 2. You earn <strong>100% of the ad-network revenue</strong>. ToolsPrompt takes <strong>0% cut</strong> from ad-network earnings.</p>
+            </div>
+        </div>
+
+        <div class="faq-item">
+            <div class="faq-q">Which ad networks are supported? <i class="fas fa-chevron-down"></i></div>
+            <div class="faq-a">
+                <p>Any ad network that provides a direct link works. Popular choices include <strong>Monetag, Adsterra, PropellerAds, PopAds, HilltopAds, AdMaven, and Clickadu</strong> — but you can use any network you prefer. Just paste the direct link in the Primary URL field.</p>
+            </div>
+        </div>
+
+        <div class="faq-item">
+            <div class="faq-q">When and how do I get paid? <i class="fas fa-chevron-down"></i></div>
+            <div class="faq-a">
+                <p>For <strong>prompt sales and tips</strong>: once your available balance reaches <strong>₹100</strong>, request a payout from your dashboard. Payments are processed via <strong>UPI or bank transfer</strong>.<br><br>For <strong>ad-network affiliates</strong>: your ad-network pays you directly on their own schedule — ToolsPrompt is not involved. Log in to your ad-network dashboard to check earnings and withdrawals.</p>
+            </div>
+        </div>
+
+        <div class="faq-item">
+            <div class="faq-q">Do I need a channel to sell prompts or add affiliates? <i class="fas fa-chevron-down"></i></div>
+            <div class="faq-a">
+                <p>No — you can sell prompts and add affiliates without a channel. But having a channel gives you a public profile, subscribers, community posts, and the ability to receive tips. We strongly recommend creating one.</p>
+            </div>
+        </div>
+
+        <div class="faq-item">
+            <div class="faq-q">Can I upload videos, or only images? <i class="fas fa-chevron-down"></i></div>
+            <div class="faq-a">
+                <p>Both! You can upload images (JPG, PNG, WebP — up to 5 MB) and video reels (MP4, WebM, QuickTime — up to 100 MB). Video reels play in our YouTube-Style Shorts player and support custom thumbnails.</p>
+            </div>
+        </div>
+
+        <div class="faq-item">
+            <div class="faq-q">What powers the AI generators? <i class="fas fa-chevron-down"></i></div>
+            <div class="faq-a">
+                <p>Our image and video generators use <strong>advanced, industry-leading AI models</strong> that deliver photorealistic images and cinematic video output. We continuously evaluate and upgrade our models to give you the best possible results. The platform also references <strong>35+ image tools</strong> and <strong>50+ video tools</strong> in our prompt comparison sections to help you choose the right external tool for each project.</p>
+            </div>
+        </div>
+
+        <div class="faq-item">
+            <div class="faq-q">Is my payment information secure? <i class="fas fa-chevron-down"></i></div>
+            <div class="faq-a">
+                <p>Absolutely. All payments are processed by a <strong>leading PCI-DSS-compliant payment gateway</strong>. We never store your card details. UPI, credit/debit cards, net banking, and wallets are all supported.</p>
+            </div>
+        </div>
+
+        <div class="faq-item">
+            <div class="faq-q">Can I delete my prompts or account? <i class="fas fa-chevron-down"></i></div>
+            <div class="faq-a">
+                <p>Yes. You can delete any prompt you've uploaded from your dashboard, and delete any affiliate link from <code>/affiliate.html</code>. For account deletion, contact our support team. Once deleted, prompts are removed from the marketplace, your channel, and all feeds.</p>
+            </div>
+        </div>
+
+        <div class="faq-item">
+            <div class="faq-q">What is the "Customize Prompt Page" feature? <i class="fas fa-chevron-down"></i></div>
+            <div class="faq-a">
+                <p>When uploading a prompt, you can optionally fill in advanced fields (platform comparison, top tools, model tips, how-to steps, expert tips, usage tips, optimization tips). These appear on your prompt's public page. If you leave them blank, the platform auto-generates them with AI — so your page always looks complete.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- ============================================================
+         CTA BANNER
+         ============================================================ -->
+    <div class="cta-banner">
+        <h2>Ready to Start Earning?</h2>
+        <p>Join thousands of creators buying, selling, generating, and monetizing AI content on ToolsPrompt.</p>
+        <div class="cta-btns">
+            <a href="login.html" class="cta-btn"><i class="fas fa-rocket"></i> Get Started Free</a>
+            <a href="affiliate.html" class="cta-btn ghost"><i class="fas fa-bolt"></i> Add Affiliate Links</a>
+        </div>
+    </div>
+
+</main>
+
+<!-- ============================================================
+     FOOTER
+     ============================================================ -->
+<footer class="site-footer">
+    <div class="footer-container">
+        <div class="footer-column">
+            <h3>ToolsPrompt</h3>
+            <p>Master the art of AI communication with our advanced prompt engineering platform. Create, buy, sell, and monetize AI prompts — all in one place.</p>
+            <div class="social-links">
+                <a href="#" aria-label="Twitter"><i class="fab fa-twitter"></i></a>
+                <a href="#" aria-label="Instagram"><i class="fab fa-instagram"></i></a>
+                <a href="#" aria-label="Discord"><i class="fab fa-discord"></i></a>
+                <a href="#" aria-label="LinkedIn"><i class="fab fa-linkedin"></i></a>
+            </div>
+        </div>
+
+        <div class="footer-column">
+            <h3>Resources</h3>
+            <ul class="footer-links">
+                <li><a href="#">Prompt Library</a></li>
+                <li><a href="#">Tutorials</a></li>
+                <li><a href="blog.html">Blog</a></li>
+                <li><a href="#">API Documentation</a></li>
+                <li><a href="#">Community Forum</a></li>
+            </ul>
+        </div>
+
+        <div class="footer-column">
+            <h3>Company</h3>
+            <ul class="footer-links">
+                <li><a href="#">About Us</a></li>
+                <li><a href="#">Careers</a></li>
+                <li><a href="#">Press</a></li>
+                <li><a href="#">Contact</a></li>
+                <li><a href="#">Partnerships</a></li>
+            </ul>
+        </div>
+
+        <div class="footer-column">
+            <h3>Legal</h3>
+            <ul class="footer-links">
+                <li><a href="tos.html">Terms of Service</a></li>
+                <li><a href="privacy.html">Privacy Policy</a></li>
+                <li><a href="copyright.html">Copyright</a></li>
+                <li><a href="cookies-ethics.html">Cookies</a></li>
+                <li><a href="cookies-ethics.html">AI Ethics</a></li>
+            </ul>
+        </div>
+    </div>
+
+    <div class="copyright">
+        &copy; 2026 ToolsPrompt.com. All rights reserved. AI-generated content is subject to respective platform terms.
+    </div>
+</footer>
+
+<script src="script.js"></script>
+
+<!-- ============================================================
+     FAQ ACCORDION + SMOOTH SCROLL
+     ============================================================ -->
+<script>
+    document.querySelectorAll('.faq-item').forEach(item => {
+        const question = item.querySelector('.faq-q');
+        if (!question) return;
+        question.addEventListener('click', () => {
+            const isOpen = item.classList.contains('open');
+            document.querySelectorAll('.faq-item.open').forEach(i => i.classList.remove('open'));
+            if (!isOpen) item.classList.add('open');
+        });
+    });
+
+    document.querySelectorAll('.quick-jump a').forEach(link => {
+        link.addEventListener('click', function (e) {
+            const targetId = this.getAttribute('href');
+            if (targetId && targetId.startsWith('#')) {
+                const target = document.querySelector(targetId);
+                if (target) {
+                    e.preventDefault();
+                    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }
+            }
+        });
+    });
+</script>
+
+<!-- ============================================================
+     COOKIE CONSENT BANNER
+     ============================================================ -->
 <div id="cookie-consent" style="display: none; position: fixed; bottom: 0; left: 0; right: 0; background: rgba(45,51,74,0.95); color: white; padding: 20px; z-index: 1000;">
-    <div class="container" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
-        <div style="flex: 1; min-width: 300px; padding-right: 20px;">
-            <p>We use cookies to enhance your experience and analyze site usage. By continuing to browse, you agree to our use of cookies. Learn more in our <a href="cookies-ethics.html" style="color: #8f94fb;">Cookies & AI Ethics Policy</a>.</p>
+    <div class="container" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+        <div style="flex: 1; min-width: 280px; padding-right: 20px;">
+            <p style="margin: 0; font-size: 0.92rem; line-height: 1.6;">We use cookies to enhance your experience and analyze site usage. By continuing to browse, you agree to our use of cookies. Learn more in our <a href="cookies-ethics.html" style="color: #8f94fb;">Cookies &amp; AI Ethics Policy</a>.</p>
         </div>
-        <div style="display: flex; gap: 10px;">
-            <button id="accept-cookies" style="background: #20bf6b; color: white; border: none; padding: 10px 20px; border-radius: 30px; cursor: pointer;">Accept All</button>
-            <button id="customize-cookies" style="background: transparent; color: white; border: 1px solid #8f94fb; padding: 10px 20px; border-radius: 30px; cursor: pointer;">Customize</button>
+        <div style="display: flex; gap: 10px; flex-shrink: 0;">
+            <button id="accept-cookies" style="background: #20bf6b; color: white; border: none; padding: 10px 20px; border-radius: 30px; cursor: pointer; font-weight: 600;">Accept All</button>
+            <button id="customize-cookies" style="background: transparent; color: white; border: 1px solid #8f94fb; padding: 10px 20px; border-radius: 30px; cursor: pointer; font-weight: 600;">Customize</button>
         </div>
     </div>
 </div>
 
 <script>
-    // Cookie consent functionality
-    document.addEventListener('DOMContentLoaded', function() {
+    document.addEventListener('DOMContentLoaded', function () {
         const consentBanner = document.getElementById('cookie-consent');
         const accepted = localStorage.getItem('cookiesAccepted');
-        
-        if (!accepted) {
+
+        if (!accepted && consentBanner) {
             consentBanner.style.display = 'block';
         }
-        
-        document.getElementById('accept-cookies').addEventListener('click', function() {
-            localStorage.setItem('cookiesAccepted', 'true');
-            consentBanner.style.display = 'none';
-        });
-        
-        document.getElementById('customize-cookies').addEventListener('click', function() {
-            window.location.href = 'cookies-ethics.html';
-        });
+
+        const acceptBtn = document.getElementById('accept-cookies');
+        if (acceptBtn) {
+            acceptBtn.addEventListener('click', function () {
+                localStorage.setItem('cookiesAccepted', 'true');
+                consentBanner.style.display = 'none';
+            });
+        }
+
+        const customizeBtn = document.getElementById('customize-cookies');
+        if (customizeBtn) {
+            customizeBtn.addEventListener('click', function () {
+                window.location.href = 'cookies-ethics.html';
+            });
+        }
     });
 </script>
+
 </body>
 </html>

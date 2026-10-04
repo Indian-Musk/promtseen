@@ -1,7 +1,6 @@
-﻿// =====================================================================
-// server.js – Full corrected file with Instagram sticky badge + animation
-// =====================================================================
-
+﻿// ========== AGNES AI CONFIGURATION ==========
+const AGNES_API_IP = '104.18.18.62';
+const AGNES_API_HOST = 'apihub.agnes-ai.com';
 const express = require('express');
 const path = require('path');
 const admin = require('firebase-admin');
@@ -13,14 +12,15 @@ const { v4: uuidv4 } = require('uuid');
 const mime = require('mime-types');
 const Razorpay = require('razorpay');
 require('dotenv').config();
+axios.defaults.timeout = 15000;
 
-// ========== NEW: OpenAI for AI Image Generation ==========
+// ========== OpenAI for AI Image Generation ==========
 const OpenAI = require('openai');
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// ========== NEW: S3 Client for Cloudflare R2 (zero egress) ==========
+// ========== S3 Client for Cloudflare R2 (zero egress) ==========
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 
 const s3Client = new S3Client({
@@ -33,9 +33,21 @@ const s3Client = new S3Client({
 });
 
 const R2_BUCKET = process.env.R2_BUCKET_NAME;
-const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL; // e.g., https://pub-xxxx.r2.dev
+const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL;
 
-// ========== Helper: upload file to R2 ==========
+// ========== Guest Generation Limit ==========
+const GUEST_LIMIT = 3;
+const guestUsage = new Map();
+
+async function uploadGeneratedImageToR2(imageBuffer, mimeType) {
+  const timestamp = Date.now();
+  const uniqueId = uuidv4();
+  const ext = mimeType.split('/')[1] || 'png';
+  const key = `generated_images/${timestamp}-${uniqueId}.${ext}`;
+  const url = await uploadToR2(imageBuffer, key, mimeType);
+  return url;
+}
+
 async function uploadToR2(buffer, key, contentType) {
   const command = new PutObjectCommand({
     Bucket: R2_BUCKET,
@@ -47,20 +59,156 @@ async function uploadToR2(buffer, key, contentType) {
   return `${R2_PUBLIC_URL}/${key}`;
 }
 
-// Add this helper function at the top of server.js
+// ==================== THUMBNAIL EXTRACTION FROM URL ====================
+async function getThumbnailFromUrl(url) {
+    try {
+        const ytMatch = url.match(/(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/)|youtu\.be\/)([\w-]{11})/);
+        if (ytMatch) {
+            const videoId = ytMatch[1];
+            const qualities = ['maxresdefault', 'sddefault', 'hqdefault', 'mqdefault', 'default'];
+            for (const quality of qualities) {
+                try {
+                    const thumbUrl = `https://img.youtube.com/vi/${videoId}/${quality}.jpg`;
+                    const response = await axios.get(thumbUrl, {
+                        responseType: 'arraybuffer',
+                        timeout: 15000,
+                        maxRedirects: 0
+                    });
+                    if (response.status === 200 && response.data && response.data.length > 0) {
+                        const contentType = response.headers['content-type'] || 'image/jpeg';
+                        if (contentType.includes('image')) {
+                            console.log(`✅ YouTube thumbnail fetched: ${thumbUrl}`);
+                            return { buffer: Buffer.from(response.data), mimeType: contentType };
+                        }
+                    }
+                } catch (e) {
+                    console.warn(`YouTube thumbnail ${quality} failed:`, e.message);
+                }
+            }
+        }
+    } catch (e) {
+        console.warn('YouTube thumbnail extraction error:', e.message);
+    }
+
+    try {
+        const igMatch = url.match(/(?:\/reel\/|\/p\/|\/tv\/)([a-zA-Z0-9_-]+)/);
+        if (igMatch) {
+            const shortcode = igMatch[1];
+            const thumbUrl = `https://www.instagram.com/p/${shortcode}/media/?size=l`;
+            const response = await axios.get(thumbUrl, {
+                responseType: 'arraybuffer',
+                timeout: 15000,
+                maxRedirects: 5,
+                headers: { 'User-Agent': 'Mozilla/5.0' }
+            });
+            if (response.status === 200 && response.data && response.data.length > 0) {
+                const contentType = response.headers['content-type'] || 'image/jpeg';
+                if (contentType.includes('image')) {
+                    console.log(`✅ Instagram thumbnail fetched via /media endpoint: ${thumbUrl}`);
+                    return { buffer: Buffer.from(response.data), mimeType: contentType };
+                }
+            }
+        }
+    } catch (e) {
+        console.warn('Instagram /media endpoint failed:', e.message);
+    }
+
+    try {
+        const igMatch = url.match(/(?:\/reel\/|\/p\/|\/tv\/)([a-zA-Z0-9_-]+)/);
+        if (igMatch) {
+            const shortcode = igMatch[1];
+            const embedUrl = `https://www.instagram.com/reel/${shortcode}/embed/captioned/`;
+            const embedResponse = await axios.get(embedUrl, {
+                timeout: 15000,
+                headers: { 'User-Agent': 'Mozilla/5.0' }
+            });
+            const html = embedResponse.data;
+            const ogImageMatch = html.match(/<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i);
+            const twitterImageMatch = html.match(/<meta[^>]*name=["']twitter:image["'][^>]*content=["']([^"']+)["']/i);
+            const imgUrl = ogImageMatch?.[1] || twitterImageMatch?.[1];
+            if (imgUrl) {
+                const imgResponse = await axios.get(imgUrl, {
+                    responseType: 'arraybuffer',
+                    timeout: 15000,
+                    headers: { 'User-Agent': 'Mozilla/5.0' }
+                });
+                if (imgResponse.status === 200) {
+                    return { buffer: Buffer.from(imgResponse.data), mimeType: imgResponse.headers['content-type'] || 'image/jpeg' };
+                }
+            }
+        }
+    } catch (e) {
+        console.warn('Instagram embed page failed:', e.message);
+    }
+
+    try {
+        const response = await axios.get(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+            },
+            timeout: 15000,
+            maxRedirects: 5
+        });
+        const html = response.data;
+        const ogImageMatch = html.match(/<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i);
+        const twitterImageMatch = html.match(/<meta[^>]*name=["']twitter:image["'][^>]*content=["']([^"']+)["']/i);
+        const imgUrl = ogImageMatch?.[1] || twitterImageMatch?.[1];
+        if (imgUrl) {
+            const imgResponse = await axios.get(imgUrl, {
+                responseType: 'arraybuffer',
+                timeout: 15000,
+                headers: { 'User-Agent': 'Mozilla/5.0' }
+            });
+            if (imgResponse.status === 200) {
+                return { buffer: Buffer.from(imgResponse.data), mimeType: imgResponse.headers['content-type'] || 'image/jpeg' };
+            }
+        }
+    } catch (e) {
+        console.warn('Direct page fetch failed:', e.message);
+    }
+
+    const proxyServices = [
+        `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+        `https://corsproxy.io/?${encodeURIComponent(url)}`,
+        `https://thingproxy.freeboard.io/fetch/${url}`
+    ];
+
+    for (const proxyUrl of proxyServices) {
+        try {
+            const proxyResponse = await axios.get(proxyUrl, { timeout: 15000 });
+            if (proxyResponse.status === 200 && proxyResponse.data) {
+                const html = proxyResponse.data.contents || proxyResponse.data;
+                const ogImageMatch = html.match(/<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i);
+                const twitterImageMatch = html.match(/<meta[^>]*name=["']twitter:image["'][^>]*content=["']([^"']+)["']/i);
+                const imgUrl = ogImageMatch?.[1] || twitterImageMatch?.[1];
+                if (imgUrl) {
+                    const imgResponse = await axios.get(imgUrl, {
+                        responseType: 'arraybuffer',
+                        timeout: 15000,
+                        headers: { 'User-Agent': 'Mozilla/5.0' }
+                    });
+                    if (imgResponse.status === 200) {
+                        console.log(`✅ Thumbnail extracted via proxy: ${proxyUrl}`);
+                        return { buffer: Buffer.from(imgResponse.data), mimeType: imgResponse.headers['content-type'] || 'image/jpeg' };
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn(`Proxy ${proxyUrl} failed:`, e.message);
+        }
+    }
+
+    console.warn('Could not extract thumbnail from URL:', url);
+    return null;
+}
+
 function sanitizeFirestoreData(data) {
     const sanitized = {};
     for (const [key, value] of Object.entries(data)) {
-        // Skip undefined values
-        if (value === undefined) {
-            continue;
-        }
-        // Handle null values
-        if (value === null) {
-            sanitized[key] = null;
-            continue;
-        }
-        // Handle objects recursively
+        if (value === undefined) continue;
+        if (value === null) { sanitized[key] = null; continue; }
         if (typeof value === 'object' && value !== null && !Array.isArray(value) && !(value instanceof Date)) {
             sanitized[key] = sanitizeFirestoreData(value);
             continue;
@@ -84,6 +232,7 @@ async function getUserCredits(userId) {
       totalUsed: 0,
       updatedAt: new Date().toISOString()
     });
+    await ensureUserReferralCode(userId);
     return { credits: 5, freeLimit: 5, isFree: true };
   }
   const data = doc.data();
@@ -100,7 +249,7 @@ async function getUserCredits(userId) {
 }
 
 async function deductCredit(userId) {
-  if (!db) return true; // mock
+  if (!db) return true;
   const doc = await db.collection('credits').doc(userId).get();
   if (!doc.exists) {
     const now = new Date().toISOString().split('T')[0];
@@ -148,7 +297,16 @@ async function addCredits(userId, amount) {
   });
 }
 
-// Initialize Razorpay
+function checkAndIncrementGuest(req, increment = false) {
+    const ip = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+    const today = new Date().toISOString().split('T')[0];
+    const key = `${ip}-${today}`;
+    let count = guestUsage.get(key) || 0;
+    if (count >= GUEST_LIMIT) return { allowed: false, remaining: 0 };
+    if (increment) guestUsage.set(key, count + 1);
+    return { allowed: true, remaining: GUEST_LIMIT - count };
+}
+
 let razorpay = null;
 let razorpayKeyId = null;
 
@@ -169,7 +327,9 @@ try {
   razorpayKeyId = 'rzp_live_SXMEZ6fYLjDmzD';
 }
 
-// Initialize Firebase Admin (Auth + Firestore ONLY, NO Storage)
+const AGNES_API_KEY = process.env.AGNES_API_KEY;
+const { Agent } = require('https');
+
 let adminInitialized = false;
 try {
   const serviceAccount = process.env.FIREBASE_ADMIN_PRIVATE_KEY ? {
@@ -181,7 +341,6 @@ try {
   if (serviceAccount && serviceAccount.privateKey) {
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
-      // storageBucket is REMOVED – we use R2 instead
     });
     adminInitialized = true;
     console.log('✅ Firebase Admin initialized (Auth + Firestore)');
@@ -192,7 +351,6 @@ try {
   console.error('❌ Firebase Admin initialization failed:', error);
 }
 
-// Create mock admin object for development if not initialized (storage mock removed)
 let adminMock = null;
 if (!adminInitialized) {
   adminMock = {
@@ -206,30 +364,14 @@ if (!adminInitialized) {
           collection: () => ({
             add: () => Promise.resolve({ id: 'mock-comment-id' }),
             get: () => Promise.resolve({ docs: [] }),
-            orderBy: () => ({
-              limit: () => ({
-                get: () => Promise.resolve({ docs: [] })
-              })
-            }),
+            orderBy: () => ({ limit: () => ({ get: () => Promise.resolve({ docs: [] }) }) }),
             count: () => ({ get: () => Promise.resolve({ data: () => ({ count: 0 }) }) })
           })
         }),
         add: () => Promise.resolve({ id: 'mock-id' }),
         get: () => Promise.resolve({ docs: [], forEach: () => {} }),
-        where: () => ({
-          orderBy: () => ({
-            limit: () => ({
-              get: () => Promise.resolve({ docs: [] })
-            })
-          })
-        }),
-        orderBy: () => ({
-          startAfter: () => ({
-            limit: () => ({
-              get: () => Promise.resolve({ docs: [] })
-            })
-          })
-        }),
+        where: () => ({ orderBy: () => ({ limit: () => ({ get: () => Promise.resolve({ docs: [] }) }) }) }),
+        orderBy: () => ({ startAfter: () => ({ limit: () => ({ get: () => Promise.resolve({ docs: [] }) }) }) }),
         limit: () => ({ get: () => Promise.resolve({ docs: [] }) }),
         count: () => ({ get: () => Promise.resolve({ data: () => ({ count: 0 }) }) })
       })
@@ -240,74 +382,47 @@ if (!adminInitialized) {
 
 const app = express();
 const port = process.env.PORT || 3000;
-
-// Initialize cache with 5 minute TTL
 const cache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
-
 const db = adminInitialized ? admin.firestore() : (adminMock ? adminMock.firestore() : null);
-// No bucket variable – we use s3Client directly
 
-// CORS middleware for development
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', 'http://localhost:3000');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-  
+  if (req.method === 'OPTIONS') return res.status(200).end();
   next();
 });
 
-// Basic middleware
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
-
-// Raw body for Razorpay webhook
 app.use('/api/razorpay-webhook', express.json());
 
-// ==================== ADS.TXT REDIRECT ====================
 app.get('/ads.txt', (req, res) => {
     const adsTxtUrl = 'https://srv.adstxtmanager.com/19390/toolsprompt.com';
     console.log(`🔄 Redirecting /ads.txt to ${adsTxtUrl}`);
     res.redirect(301, adsTxtUrl);
 });
-// Serve static files from current directory
+
 app.use(express.static(__dirname));
 
-
-// Helper function for safe date conversion
 function safeDateToString(dateValue) {
-  if (!dateValue) {
-    return new Date().toISOString();
-  }
-  
+  if (!dateValue) return new Date().toISOString();
   try {
-    if (dateValue.toDate && typeof dateValue.toDate === 'function') {
-      return dateValue.toDate().toISOString();
-    } else if (typeof dateValue === 'string') {
+    if (dateValue.toDate && typeof dateValue.toDate === 'function') return dateValue.toDate().toISOString();
+    else if (typeof dateValue === 'string') {
       const testDate = new Date(dateValue);
       return isNaN(testDate.getTime()) ? new Date().toISOString() : dateValue;
-    } else if (dateValue instanceof Date) {
-      return dateValue.toISOString();
-    } else {
-      return new Date().toISOString();
-    }
+    } else if (dateValue instanceof Date) return dateValue.toISOString();
+    else return new Date().toISOString();
   } catch (error) {
     console.error('Date conversion error:', error);
     return new Date().toISOString();
   }
 }
 
-// ==================== ADSTERRA AD HELPER FUNCTIONS ====================
-
-/**
- * Generates Adsterra Native Banner Ad code
- */
+// ==================== ADSTERRA HELPERS ====================
 function generateAdsterraNativeAd() {
     return `
-        <!-- Adsterra Native Banner Ad -->
         <div class="ad-container">
             <div class="ad-label">Advertisement</div>
             <div id="container-aca55beb03e2d8b514ae3f122920bdf0"></div>
@@ -316,54 +431,30 @@ function generateAdsterraNativeAd() {
     `;
 }
 
-/**
- * Generates Adsterra Banner Ad for Desktop (300x250)
- */
 function generateAdsterraDesktopBanner() {
     return `
-        <!-- Adsterra Banner Ad - Desktop 300x250 -->
         <div class="ad-container ad-banner-desktop">
             <div class="ad-label">Advertisement</div>
             <script>
-              atOptions = {
-                'key' : '8719e4636a7c41462203d84e956177c4',
-                'format' : 'iframe',
-                'height' : 250,
-                'width' : 300,
-                'params' : {}
-              };
+              atOptions = { 'key' : '8719e4636a7c41462203d84e956177c4', 'format' : 'iframe', 'height' : 250, 'width' : 300, 'params' : {} };
             </script>
             <script src="https://www.highperformanceformat.com/8719e4636a7c41462203d84e956177c4/invoke.js"></script>
         </div>
     `;
 }
 
-/**
- * Generates Adsterra Banner Ad for Mobile (320x50)
- */
 function generateAdsterraMobileBanner() {
     return `
-        <!-- Adsterra Banner Ad - Mobile 320x50 -->
         <div class="ad-container ad-banner-mobile">
             <div class="ad-label">Advertisement</div>
             <script>
-              atOptions = {
-                'key' : '37e3a123e9b664f6f0b0efed6c7ee71f',
-                'format' : 'iframe',
-                'height' : 50,
-                'width' : 320,
-                'params' : {}
-              };
+              atOptions = { 'key' : '37e3a123e9b664f6f0b0efed6c7ee71f', 'format' : 'iframe', 'height' : 50, 'width' : 320, 'params' : {} };
             </script>
             <script src="https://www.highperformanceformat.com/37e3a123e9b664f6f0b0efed6c7ee71f/invoke.js"></script>
         </div>
     `;
 }
 
-/**
- * Generates all Adsterra ads combined (Native + Desktop + Mobile)
- * Desktop and Mobile are shown/hidden via CSS media queries
- */
 function generateAllAdsterraAds() {
     return `
         ${generateAdsterraNativeAd()}
@@ -372,13 +463,10 @@ function generateAllAdsterraAds() {
     `;
 }
 
-// ==================== DOWNLOAD APP BUTTON FUNCTIONS ====================
-
-// Floating Download App Button CSS
+// ==================== DOWNLOAD APP BUTTON ====================
 const downloadAppCSS = `
-/* Floating Download App Button */
 .floating-download-btn {
- display: none !important;
+    display: none !important;
     position: fixed;
     bottom: 30px;
     left: 50%;
@@ -402,92 +490,36 @@ const downloadAppCSS = `
     border: 1px solid rgba(255, 255, 255, 0.2);
     font-family: 'Segoe UI', sans-serif;
 }
-
 .floating-download-btn:hover {
     transform: translateX(-50%) scale(1.05);
     box-shadow: 0 12px 35px rgba(78, 84, 200, 0.6);
     background: linear-gradient(135deg, #3b41b5 0%, #7c82f0 100%);
 }
-
-.floating-download-btn:active {
-    transform: translateX(-50%) scale(0.98);
-}
-
-.floating-download-btn i {
-    font-size: 1.2rem;
-    animation: bounce 2s infinite;
-}
-
-.floating-download-btn .btn-text {
-    letter-spacing: 0.5px;
-}
-
+.floating-download-btn:active { transform: translateX(-50%) scale(0.98); }
+.floating-download-btn i { font-size: 1.2rem; animation: bounce 2s infinite; }
+.floating-download-btn .btn-text { letter-spacing: 0.5px; }
 .floating-download-btn .btn-badge {
-    background: #ff6b6b;
-    color: white;
-    border-radius: 20px;
-    padding: 2px 8px;
-    font-size: 0.7rem;
-    margin-left: 8px;
-    font-weight: normal;
+    background: #ff6b6b; color: white; border-radius: 20px;
+    padding: 2px 8px; font-size: 0.7rem; margin-left: 8px; font-weight: normal;
 }
-
 @keyframes bounce {
-    0%, 100% {
-        transform: translateY(0);
-    }
-    50% {
-        transform: translateY(-3px);
-    }
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-3px); }
 }
-
-/* Slide up animation for button */
 @keyframes slideUpFade {
-    from {
-        opacity: 0;
-        transform: translateX(-50%) translateY(30px);
-    }
-    to {
-        opacity: 1;
-        transform: translateX(-50%) translateY(0);
-    }
+    from { opacity: 0; transform: translateX(-50%) translateY(30px); }
+    to { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
-
-.floating-download-btn {
-    animation: slideUpFade 0.5s ease-out;
-}
-
+.floating-download-btn { animation: slideUpFade 0.5s ease-out; }
 @media (max-width: 768px) {
-    .floating-download-btn {
-        padding: 12px 20px;
-        font-size: 0.85rem;
-        gap: 8px;
-        bottom: 20px;
-    }
-    
-    .floating-download-btn i {
-        font-size: 1rem;
-    }
+    .floating-download-btn { padding: 12px 20px; font-size: 0.85rem; gap: 8px; bottom: 20px; }
+    .floating-download-btn i { font-size: 1rem; }
 }
-
 @media (max-width: 480px) {
-    .floating-download-btn {
-        padding: 10px 16px;
-        font-size: 0.75rem;
-        gap: 6px;
-        bottom: 15px;
-    }
-    
-    .floating-download-btn i {
-        font-size: 0.9rem;
-    }
+    .floating-download-btn { padding: 10px 16px; font-size: 0.75rem; gap: 6px; bottom: 15px; }
+    .floating-download-btn i { font-size: 0.9rem; }
 }
-
-/* Hide on certain pages if needed */
-.floating-download-btn.hidden {
-    display: none;
-}
-
+.floating-download-btn.hidden { display: none; }
 @keyframes pulse {
     0% { transform: translateX(-50%) scale(1); box-shadow: 0 8px 25px rgba(78, 84, 200, 0.4); }
     50% { transform: translateX(-50%) scale(1.08); box-shadow: 0 12px 35px rgba(78, 84, 200, 0.7); }
@@ -495,9 +527,7 @@ const downloadAppCSS = `
 }
 `;
 
-// Floating Download App Button HTML
 const downloadAppButtonHTML = `
-<!-- Floating Download App Button -->
 <button class="floating-download-btn" id="downloadAppBtn" onclick="downloadApp()">
     <i class="fas fa-download"></i>
     <span class="btn-text">Download App</span>
@@ -505,16 +535,559 @@ const downloadAppButtonHTML = `
 </button>
 `;
 
+const aiGeneratorCSS = `
+.ai-generator-bar {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    background: rgba(255, 255, 255, 0.98);
+    backdrop-filter: blur(10px);
+    border-top: 1px solid #e9ecef;
+    padding: 8px 12px;
+    display: none; align-items: center; gap: 8px;
+    z-index: 9999;
+    box-shadow: 0 -4px 20px rgba(0,0,0,0.1);
+    transition: transform 0.3s ease;
+    flex-wrap: nowrap;
+}
+.ai-generator-bar.active { display: flex; }
+.ai-generator-input {
+    flex: 1 1 auto; min-width: 60px; max-height: 80px;
+    padding: 8px 12px; border: 2px solid #e9ecef; border-radius: 24px;
+    font-size: 0.9rem; resize: none; outline: none;
+    transition: border-color 0.3s ease; font-family: inherit;
+    background: white; line-height: 1.4;
+}
+.ai-generator-input:focus { border-color: #4e54c8; }
+.ai-generator-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.ai-image-upload-btn {
+    background: #f1f3f5; border: none; width: 38px; height: 38px;
+    border-radius: 50%; font-size: 1.2rem; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: all 0.3s ease; color: #495057; flex-shrink: 0;
+}
+.ai-image-upload-btn:hover { background: #4e54c8; color: white; transform: scale(1.05); }
+.ai-generate-btn {
+    background: linear-gradient(135deg, #4e54c8, #8f94fb);
+    border: none; width: 38px; height: 38px; border-radius: 50%;
+    color: white; font-size: 1.1rem; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: all 0.3s ease; box-shadow: 0 4px 12px rgba(78,84,200,0.3); flex-shrink: 0;
+}
+.ai-generate-btn:hover { transform: scale(1.05); box-shadow: 0 6px 20px rgba(78,84,200,0.5); }
+.ai-generate-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+.ai-credit-display {
+    font-size: 0.75rem; color: #495057; padding: 0 4px;
+    white-space: nowrap; display: flex; align-items: center; gap: 3px; flex-shrink: 0;
+}
+.ai-credit-display .credits-num { font-weight: 700; color: #4e54c8; }
+.ai-file-input { display: none; }
+.ai-image-preview {
+    display: none; position: relative; width: 34px; height: 34px;
+    border-radius: 8px; overflow: hidden; flex-shrink: 0; border: 2px solid #4e54c8;
+}
+.ai-image-preview img { width: 100%; height: 100%; object-fit: cover; }
+.ai-image-preview .remove-image {
+    position: absolute; top: -6px; right: -6px; background: #ff6b6b;
+    color: white; border: none; border-radius: 50%; width: 18px; height: 18px;
+    font-size: 10px; cursor: pointer; display: flex; align-items: center; justify-content: center;
+}
+.ai-mode-toggle-group {
+    display: flex; background: #e9ecef; border-radius: 20px;
+    padding: 2px; gap: 0; flex-shrink: 0; border: 1px solid #dee2e6;
+}
+.ai-mode-option {
+    background: transparent; border: none; padding: 4px 10px;
+    border-radius: 18px; font-size: 0.75rem; font-weight: 600;
+    color: #495057; cursor: pointer; transition: all 0.3s ease;
+    display: flex; align-items: center; gap: 4px; white-space: nowrap;
+}
+.ai-mode-option i { font-size: 0.9rem; }
+.ai-mode-option.active {
+    background: white; color: #4e54c8; box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+.ai-mode-option:hover:not(.active) { background: rgba(255,255,255,0.5); }
+.ai-mode-option:active { transform: scale(0.95); }
+.generated-modal {
+    display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.85); z-index: 99999;
+    align-items: center; justify-content: center; padding: 20px;
+}
+.generated-modal.active { display: flex; }
+.generated-modal-content { max-width: 90%; max-height: 90%; position: relative; }
+.generated-modal-content img {
+    max-width: 100%; max-height: 90vh; border-radius: 12px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+}
+.generated-modal-close {
+    position: absolute; top: -40px; right: -40px; background: white;
+    border: none; width: 40px; height: 40px; border-radius: 50%;
+    font-size: 1.5rem; cursor: pointer; display: flex; align-items: center;
+    justify-content: center; color: #333; box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+}
+.generated-modal-close:hover { background: #ff6b6b; color: white; }
+.generated-modal-download {
+    position: absolute; bottom: -50px; left: 50%; transform: translateX(-50%);
+    background: #4e54c8; color: white; border: none; padding: 10px 24px;
+    border-radius: 30px; font-weight: 600; cursor: pointer; transition: background 0.3s ease;
+}
+.generated-modal-download:hover { background: #3f44b8; }
+@media (max-width: 768px) {
+    .ai-generator-bar { flex-wrap: wrap; padding: 6px 8px; gap: 6px; bottom: 0 !important; }
+    .ai-generator-input { flex: 1 1 100%; min-height: 38px; font-size: 0.85rem; padding: 8px 12px; border-radius: 20px; }
+    .ai-generator-actions { flex-wrap: wrap; justify-content: flex-end; gap: 4px; width: 100%; }
+    .duration-option { padding: 2px 6px !important; gap: 3px !important; }
+    .duration-option input[type="range"] { width: 40px !important; height: 4px !important; }
+    .duration-option span { font-size: 0.6rem !important; min-width: 20px !important; }
+    .ai-image-upload-btn, .ai-generate-btn { width: 30px !important; height: 30px !important; font-size: 0.8rem !important; }
+    .ai-mode-option { padding: 2px 6px !important; font-size: 0.6rem !important; }
+    .ai-mode-option span { display: none; }
+    .ai-mode-option i { font-size: 0.9rem !important; }
+    .ai-credit-display { font-size: 0.6rem !important; padding: 0 2px; }
+    .ai-image-preview { width: 28px; height: 28px; }
+    .ai-image-preview .remove-image { width: 16px; height: 16px; font-size: 8px; top: -4px; right: -4px; }
+}
+@media (max-width: 480px) {
+    .ai-generator-bar { padding: 4px 6px; gap: 4px; bottom: 56px; }
+    .ai-generator-input { min-height: 32px; font-size: 0.75rem; padding: 4px 10px; border-radius: 16px; flex: 1 1 100%; }
+    .ai-generator-actions { gap: 3px; }
+    .duration-option input[type="range"] { width: 32px !important; }
+    .ai-image-upload-btn, .ai-generate-btn { width: 26px !important; height: 26px !important; font-size: 0.7rem !important; }
+    .ai-mode-option span { display: none; }
+    .ai-mode-option i { font-size: 1rem !important; }
+    .ai-credit-display { font-size: 0.55rem; }
+    .ai-credit-display .credits-num { font-size: 0.65rem; }
+    .ai-image-preview { width: 24px; height: 24px; }
+}
+`;
+
+const socialBadgesCSS = `
+.social-badges-container {
+    position: fixed; left: 20px; top: 50%; transform: translateY(-50%);
+    z-index: 9998; display: flex; flex-direction: column; align-items: center; gap: 8px;
+}
+.social-badges-toggle {
+    background: rgba(255, 255, 255, 0.95); border: none; border-radius: 50%;
+    width: 40px; height: 40px; display: flex; align-items: center; justify-content: center;
+    cursor: pointer; box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2); transition: all 0.3s ease;
+    color: #4e54c8; font-size: 1.2rem; margin-bottom: 6px; backdrop-filter: blur(5px);
+    border: 2px solid rgba(255, 255, 255, 0.3);
+}
+.social-badges-toggle:hover { transform: scale(1.1); box-shadow: 0 6px 20px rgba(78, 84, 200, 0.4); }
+.social-badge {
+    background: rgba(255, 255, 255, 0.95); border-radius: 50px; padding: 10px 12px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-decoration: none; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+    transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1); cursor: pointer;
+    min-width: 44px; min-height: 44px; font-family: 'Segoe UI', sans-serif;
+    border: 2px solid rgba(255, 255, 255, 0.2); backdrop-filter: blur(5px);
+    animation: social-shake 5s ease-in-out infinite; transform-origin: center;
+    color: white; opacity: 1; transform: scale(1) translateY(0); pointer-events: auto;
+}
+.social-badges-container.collapsed .social-badge {
+    opacity: 0; transform: scale(0.5) rotateY(90deg) translateY(-40px);
+    pointer-events: none; animation: none;
+}
+.social-badges-container.collapsed .social-badges-toggle i { transform: rotate(180deg); }
+.social-badge:hover {
+    transform: scale(1.1); box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+    border-color: rgba(255, 255, 255, 0.5); animation: none;
+}
+.social-badge i { font-size: 1.8rem; margin-bottom: 4px; text-shadow: 0 2px 8px rgba(0, 0, 0, 0.3); }
+.social-badge .followers-text {
+    font-size: 0.65rem; font-weight: 700; letter-spacing: 0.5px;
+    text-shadow: 0 1px 4px rgba(0, 0, 0, 0.3); white-space: nowrap;
+}
+.instagram-badge {
+    background: linear-gradient(135deg, #405de6, #5851db, #833ab4, #c13584, #e1306c, #fd1d1d);
+    background-size: 200% 200%;
+    animation: social-shake 5s ease-in-out infinite, gradient-shift 3s ease infinite;
+}
+.youtube-badge {
+    background: linear-gradient(135deg, #ff0000, #cc0000);
+    background-size: 200% 200%;
+    animation: social-shake 5s ease-in-out infinite 0.5s, gradient-shift 3s ease infinite 0.5s;
+}
+.whatsapp-badge {
+    background: linear-gradient(135deg, #25d366, #128c7e);
+    background-size: 200% 200%;
+    animation: social-shake 5s ease-in-out infinite 1s, gradient-shift 3s ease infinite 1s;
+}
+@keyframes social-shake {
+    0%, 88% { transform: scale(1); }
+    90% { transform: scale(1.15); }
+    92% { transform: scale(0.85); }
+    94% { transform: scale(1.05); }
+    96% { transform: scale(0.95); }
+    98% { transform: scale(1.02); }
+    100% { transform: scale(1); }
+}
+@keyframes gradient-shift {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+}
+@media (max-width: 768px) {
+    .social-badges-container { left: 10px; gap: 6px; }
+    .social-badges-toggle { width: 34px; height: 34px; font-size: 1rem; }
+    .social-badge { padding: 8px 10px; min-width: 38px; min-height: 38px; }
+    .social-badge i { font-size: 1.4rem; }
+    .social-badge .followers-text { font-size: 0.5rem; }
+}
+@media (max-width: 480px) {
+    .social-badges-container { left: 6px; gap: 4px; }
+    .social-badges-toggle { width: 28px; height: 28px; font-size: 0.8rem; }
+    .social-badge { padding: 6px 8px; min-width: 32px; min-height: 32px; }
+    .social-badge i { font-size: 1.2rem; }
+    .social-badge .followers-text { font-size: 0.45rem; }
+}
+`;
+
+const socialFeedCSS = `
+.social-feed-container {
+    position: fixed; right: 0; top: 50%; transform: translateY(-50%);
+    z-index: 9999; display: flex; align-items: center; direction: rtl;
+}
+.social-feed-toggle {
+    background: #4e54c8; color: white; border: none;
+    border-radius: 8px 0 0 8px; padding: 12px 8px; cursor: pointer;
+    font-size: 1.2rem; transition: all 0.3s ease;
+    box-shadow: -2px 0 10px rgba(0,0,0,0.2); touch-action: manipulation;
+    z-index: 10000; min-width: 44px; min-height: 44px;
+    display: flex; align-items: center; justify-content: center;
+}
+.social-feed-toggle:hover { background: #3f44b8; transform: scale(1.05); }
+.social-feed-toggle:active { transform: scale(0.95); }
+.social-feed-panel {
+    width: 0; height: 0; background: white;
+    border-radius: 8px 0 0 8px; box-shadow: -5px 0 20px rgba(0,0,0,0.15);
+    overflow: hidden; transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    display: flex; flex-direction: column; opacity: 0; direction: ltr;
+}
+.social-feed-container.expanded .social-feed-panel {
+    width: 400px; height: 60vh; max-height: 80vh; opacity: 1;
+}
+@media (max-width: 768px) {
+    .social-feed-container { top: 50%; transform: translateY(-50%); right: 0; left: auto; bottom: auto; flex-direction: row; align-items: center; height: auto; }
+    .social-feed-toggle { border-radius: 8px 0 0 8px; padding: 12px 8px; position: static; bottom: auto; right: auto; width: auto; height: auto; box-shadow: -2px 0 10px rgba(0,0,0,0.2); font-size: 1.2rem; min-width: 44px; min-height: 44px; }
+    .social-feed-container.expanded .social-feed-panel { width: 90vw; height: 90vh; max-height: 90vh; right: 0; bottom: auto; top: auto; border-radius: 0; }
+}
+@media (max-width: 480px) {
+    .social-feed-container.expanded .social-feed-panel { width: 90vw; height: 90vh; max-height: 90vh; border-radius: 0; margin-right: 5vw; }
+    .social-feed-panel { border-radius: 12px 12px 0 0; width: 100%; height: 0; opacity: 0; transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
+}
+.feed-header {
+    padding: 12px 16px; border-bottom: 1px solid #e9ecef;
+    display: flex; justify-content: space-between; align-items: center; background: #f8f9fa;
+}
+.feed-header h3 { margin: 0; font-size: 1.1rem; color: #4e54c8; }
+.feed-close { background: none; border: none; font-size: 1.2rem; cursor: pointer; color: #666; }
+.feed-tabs { display: flex; background: #f8f9fa; border-bottom: 1px solid #e9ecef; }
+.feed-tab {
+    flex: 1; padding: 10px; background: none; border: none;
+    border-bottom: 2px solid transparent; cursor: pointer; font-weight: 500; transition: all 0.3s ease;
+}
+.feed-tab.active { border-bottom-color: #4e54c8; color: #4e54c8; }
+.feed-tab:hover { background: rgba(78,84,200,0.05); }
+.feed-content { flex: 1; overflow: hidden; position: relative; }
+.feed-tab-content { display: none; height: 100%; overflow-y: auto; padding: 10px; }
+.feed-tab-content.active { display: block; }
+.chat-message { position: relative; transition: background 0.2s ease; }
+.chat-message:hover .msg-actions { display: flex; }
+.msg-actions {
+    position: absolute; right: 5px; top: 5px; display: none; flex-direction: row;
+    gap: 4px; background: rgba(255,255,255,0.9); border-radius: 20px;
+    padding: 4px 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+.msg-actions button {
+    background: none; border: none; cursor: pointer; font-size: 1rem;
+    padding: 2px 6px; border-radius: 12px; transition: background 0.2s;
+}
+.msg-actions button:hover { background: #e9ecef; }
+.msg-reply-context {
+    font-size: 0.8rem; color: #666; background: #f1f3f4;
+    padding: 2px 8px; border-radius: 8px; margin-bottom: 4px; border-left: 3px solid #4e54c8;
+}
+.msg-sticker { font-size: 2.5rem; line-height: 1.2; padding: 4px 0; }
+.chat-messages { height: calc(100% - 80px); overflow-y: auto; padding: 10px; }
+.chat-message {
+    margin-bottom: 12px; padding: 8px 12px; border-radius: 12px;
+    background: #f1f3f4; max-width: 85%; word-wrap: break-word; position: relative;
+}
+.chat-message.own { background: #4e54c8; color: white; margin-left: auto; }
+.chat-message .msg-user { font-size: 0.8rem; font-weight: 600; margin-bottom: 2px; }
+.chat-message .msg-time { font-size: 0.7rem; color: #999; float: right; }
+.chat-message .msg-content { line-height: 1.4; }
+.chat-message .msg-reactions { margin-top: 4px; display: flex; gap: 6px; flex-wrap: wrap; }
+.chat-message .msg-reactions span {
+    background: rgba(0,0,0,0.1); padding: 2px 6px; border-radius: 12px;
+    font-size: 0.8rem; cursor: pointer;
+}
+.chat-message .msg-actions { position: absolute; right: -30px; top: 0; display: none; }
+.chat-message:hover .msg-actions { display: flex; flex-direction: column; gap: 4px; }
+.chat-message .msg-actions button { background: none; border: none; cursor: pointer; font-size: 0.9rem; color: #666; }
+.chat-input-area { padding: 8px 10px; border-top: 1px solid #e9ecef; background: #f8f9fa; }
+.reply-indicator {
+    background: #e9ecef; padding: 6px 10px; border-radius: 8px; margin-bottom: 6px;
+    display: flex; justify-content: space-between; align-items: center; font-size: 0.8rem;
+}
+.chat-input-row { display: flex; gap: 8px; align-items: center; }
+.chat-input-row input { flex: 1; padding: 8px 12px; border: 1px solid #ddd; border-radius: 20px; outline: none; }
+.chat-input-row button {
+    background: #4e54c8; color: white; border: none; border-radius: 50%;
+    width: 36px; height: 36px; display: flex; align-items: center; justify-content: center;
+    cursor: pointer; transition: background 0.3s ease;
+}
+.chat-input-row button:hover { background: #3f44b8; }
+.sticker-btn { background: #e9ecef; color: #666; }
+.sticker-picker {
+    display: none; position: absolute; bottom: 60px; left: 0; background: white;
+    border: 1px solid #e9ecef; border-radius: 12px; padding: 10px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1); grid-template-columns: repeat(4, 1fr); gap: 6px;
+}
+.sticker-picker.open { display: grid; }
+.sticker-picker button { background: none; border: none; font-size: 2rem; cursor: pointer; transition: transform 0.2s ease; }
+.sticker-picker button:hover { transform: scale(1.2); }
+.reaction-picker {
+    display: none; position: absolute; background: white; border-radius: 20px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2); padding: 6px 10px; gap: 6px; z-index: 10;
+}
+.reaction-picker.open { display: flex; }
+.reaction-picker button { background: none; border: none; font-size: 1.6rem; cursor: pointer; transition: transform 0.2s ease; }
+.reaction-picker button:hover { transform: scale(1.3); }
+.activity-item {
+    padding: 10px; border-bottom: 1px solid #e9ecef; display: flex; gap: 10px; align-items: flex-start;
+}
+.activity-item .act-icon { font-size: 1.5rem; color: #4e54c8; }
+.activity-item .act-content { flex: 1; }
+.activity-item .act-content h4 { margin: 0; font-size: 0.95rem; }
+.activity-item .act-content p { margin: 2px 0; font-size: 0.85rem; color: #666; }
+.activity-item .act-time { font-size: 0.7rem; color: #999; }
+.floating-hearts {
+    position: fixed; pointer-events: none; z-index: 99999; font-size: 2rem;
+    animation: floatUp 1.5s ease-out forwards;
+}
+@keyframes floatUp {
+    0% { opacity: 1; transform: translateY(0) scale(0.8); }
+    100% { opacity: 0; transform: translateY(-150px) scale(1.2); }
+}
+`;
+
+
+// ==================== PLATFORM COMPARISON CSS ====================
+const platformComparisonCSS = `
+.platform-comparison {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white; padding: 2rem; border-radius: 15px;
+    margin: 2rem 0; position: relative; overflow: hidden;
+}
+.platform-comparison::before {
+    content: ''; position: absolute; top: -50%; right: -50%;
+    width: 100%; height: 200%; background: rgba(255,255,255,0.1);
+    transform: rotate(45deg);
+}
+.platform-comparison h3 {
+    position: relative; z-index: 1; margin-bottom: 1rem;
+    font-size: 1.5rem; color: white;
+}
+.platform-comparison p {
+    position: relative; z-index: 1; opacity: 0.9; margin-bottom: 1.5rem;
+}
+.comparison-table-container {
+    position: relative; z-index: 1; margin: 1.5rem 0;
+    background: rgba(255,255,255,0.1); border-radius: 12px;
+    padding: 1rem; backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    overflow-x: auto; -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin; scrollbar-color: #4e54c8 rgba(255,255,255,0.2);
+    touch-action: pan-y pinch-zoom;
+}
+.comparison-table-container::-webkit-scrollbar { height: 6px; }
+.comparison-table-container::-webkit-scrollbar-track { background: rgba(255,255,255,0.1); border-radius: 10px; }
+.comparison-table-container::-webkit-scrollbar-thumb { background: #4e54c8; border-radius: 10px; }
+.platform-comparison-table {
+    width: 100%; border-collapse: collapse; min-width: 600px; margin-bottom: 1rem;
+}
+.platform-comparison-table th {
+    background: rgba(255,255,255,0.2); color: white; font-weight: 700;
+    text-align: left; padding: 0.75rem; border-bottom: 2px solid rgba(255,255,255,0.3);
+    font-size: 0.85rem; letter-spacing: 0.5px; white-space: nowrap;
+}
+.platform-comparison-table td {
+    padding: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.1);
+    color: rgba(255,255,255,0.9); font-size: 0.9rem; vertical-align: top;
+    line-height: 1.4; white-space: nowrap;
+}
+.platform-comparison-table tr:hover { background: rgba(255,255,255,0.1); }
+.platform-comparison-table tr.primary-platform { background: rgba(255,255,255,0.2); border-left: 5px solid #ffd700; }
+.primary-badge {
+    background: #ffd700; color: #333; padding: 2px 8px; border-radius: 20px;
+    font-size: 0.7rem; font-weight: 700; margin-left: 6px;
+    vertical-align: middle; white-space: nowrap; box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+}
+.price-tag { display: inline-block; padding: 4px 10px; border-radius: 20px; font-size: 0.8rem; font-weight: 600; white-space: nowrap; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+.price-free { background: #10b981; color: white; }
+.price-paid { background: #ff9f43; color: white; }
+.category-badge { display: inline-block; padding: 4px 10px; border-radius: 20px; font-size: 0.8rem; font-weight: 600; background: rgba(255,255,255,0.2); color: white; white-space: nowrap; }
+.category-professional { background: #4e54c8; }
+.category-artistic { background: #9b59b6; }
+.category-open-source { background: #2c3e50; }
+.category-free { background: #20bf6b; }
+.category-commercial { background: #2980b9; }
+.category-editing { background: #e67e22; }
+.category-design { background: #f1c40f; color: #333; }
+.category-versatile { background: #3498db; }
+.category-mobile { background: #e91e63; }
+.category-nft { background: #8e44ad; }
+.category-real-time { background: #16a085; }
+.category-video { background: #ff6b6b; }
+.category-animation { background: #f39c12; }
+.category-social { background: #00acc1; }
+.category-marketing { background: #d35400; }
+.category-avatar { background: #c0392b; }
+.category-cinematic { background: #1abc9c; }
+.category-motion { background: #d35400; }
+.category-3d { background: #2ecc71; }
+.category-expressive { background: #e74c3c; }
+.category-storytelling { background: #9b59b6; }
+.comparison-tips {
+    position: relative; z-index: 1; background: rgba(255,255,255,0.1);
+    padding: 1.25rem; border-radius: 10px; margin-top: 1.25rem;
+    backdrop-filter: blur(10px);
+}
+.comparison-tips ul { margin: 0; padding-left: 1.25rem; }
+.comparison-tips li { margin-bottom: 0.5rem; opacity: 0.9; font-size: 0.9rem; }
+.tools-grid-enhanced { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1.25rem; margin-top: 1rem; }
+.tool-card-enhanced {
+    background: white; padding: 1.25rem; border-radius: 12px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1); border-left: 4px solid #4e54c8;
+    transition: all 0.3s ease; position: relative; overflow: hidden;
+}
+.tool-card-enhanced:hover { transform: translateY(-5px); box-shadow: 0 8px 20px rgba(0,0,0,0.15); }
+.tool-card-enhanced.primary-tool { border-left: 4px solid #10b981; background: linear-gradient(135deg, #f8f9fa 0%, #ffffff 100%); }
+.tool-card-enhanced.primary-tool::before {
+    content: '★ Recommended'; position: absolute; top: 10px; right: 10px;
+    background: #10b981; color: white; padding: 4px 8px; border-radius: 12px;
+    font-size: 0.7rem; font-weight: 600; box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+}
+.tool-card-enhanced h4 {
+    color: #4e54c8; margin-bottom: 0.5rem; font-size: 1.15rem;
+    display: flex; align-items: center; justify-content: space-between;
+}
+.tool-rating { display: flex; gap: 2px; }
+.tool-rating i { color: #ffd700; font-size: 0.9rem; }
+.tool-card-enhanced p { color: #555; margin-bottom: 0.75rem; font-size: 0.95rem; line-height: 1.5; }
+.tool-tags { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1rem; }
+.tool-tag { background: rgba(78, 84, 200, 0.1); color: #4e54c8; padding: 4px 10px; border-radius: 15px; font-size: 0.75rem; font-weight: 500; }
+.model-specific-tips { background: #f8f9fa; padding: 1.5rem; border-radius: 12px; margin: 1.5rem 0; border: 2px solid #e9ecef; }
+.model-specific-tips h4 { color: #4e54c8; margin-bottom: 1rem; font-size: 1.2rem; }
+.model-tips-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; margin-top: 1rem; }
+.model-tip {
+    background: white; padding: 1.25rem; border-radius: 10px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1); border-top: 4px solid #4e54c8;
+    transition: transform 0.3s ease;
+}
+.model-tip:hover { transform: translateY(-3px); box-shadow: 0 8px 20px rgba(0,0,0,0.15); }
+.model-tip h5 { color: #4e54c8; margin-bottom: 0.5rem; font-size: 1rem; display: flex; align-items: center; gap: 0.5rem; }
+.model-tip ul { margin: 0; padding-left: 1rem; }
+.model-tip li { margin-bottom: 0.4rem; color: #555; font-size: 0.85rem; }
+.model-tip code { background: #f1f3f9; padding: 2px 6px; border-radius: 4px; font-family: 'Courier New', monospace; color: #4e54c8; font-size: 0.8rem; }
+@media (max-width: 768px) {
+    .platform-comparison { padding: 1.25rem; margin: 1rem 0; border-radius: 12px; }
+    .platform-comparison h3 { font-size: 1.2rem; margin-bottom: 0.5rem; }
+    .platform-comparison p { font-size: 0.9rem; }
+    .comparison-table-container { padding: 0.5rem; margin: 1rem 0; border-radius: 10px; }
+    .comparison-table-container::-webkit-scrollbar { height: 8px; }
+    .platform-comparison-table th, .platform-comparison-table td { padding: 0.5rem; font-size: 0.8rem; }
+    .primary-badge { font-size: 0.6rem; padding: 2px 6px; }
+    .price-tag, .category-badge { font-size: 0.7rem; padding: 2px 6px; }
+    .comparison-tips { padding: 1rem; font-size: 0.85rem; }
+    .tools-grid-enhanced { grid-template-columns: 1fr; gap: 0.75rem; }
+    .tool-card-enhanced { padding: 1rem; }
+    .model-specific-tips { padding: 1.25rem; margin: 1.25rem 0; }
+    .model-tips-grid { grid-template-columns: 1fr; gap: 0.75rem; }
+    .model-tip { padding: 1rem; }
+}
+@media (max-width: 480px) {
+    .platform-comparison { padding: 0.75rem; border-radius: 8px; }
+    .platform-comparison h3 { font-size: 1.05rem; }
+    .platform-comparison-table { min-width: 580px; }
+    .platform-comparison-table th, .platform-comparison-table td { padding: 0.4rem; font-size: 0.75rem; }
+    .tool-card-enhanced h4 { font-size: 0.95rem; }
+    .model-tip h5 { font-size: 0.9rem; }
+}
+`;
+
+// ==================== COMMENT SYSTEM CSS ====================
+const commentSystemCSS = `
+.comment-section { margin-top: 2rem; padding: 1.5rem; background: white; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+.comment-section h2 { color: #4e54c8; margin-bottom: 1.5rem; font-size: 1.5rem; display: flex; align-items: center; gap: 0.5rem; }
+.comment-form { background: #f8f9fa; padding: 1.5rem; border-radius: 10px; margin-bottom: 2rem; }
+.comment-form h3 { color: #2d334a; margin-bottom: 1rem; font-size: 1.2rem; }
+.comment-form .form-group { margin-bottom: 1rem; }
+.comment-form .form-group label { display: block; margin-bottom: 0.5rem; color: #555; font-weight: 500; }
+.comment-form .form-group input, .comment-form .form-group textarea {
+    width: 100%; padding: 12px; border: 1px solid #ddd;
+    border-radius: 8px; font-size: 1rem; transition: all 0.3s ease;
+}
+.comment-form .form-group input:focus, .comment-form .form-group textarea:focus {
+    outline: none; border-color: #4e54c8; box-shadow: 0 0 0 3px rgba(78, 84, 200, 0.1);
+}
+.comment-form .form-group textarea { min-height: 120px; resize: vertical; font-family: inherit; }
+.comment-submit-btn {
+    background: linear-gradient(135deg, #4e54c8 0%, #8f94fb 100%);
+    color: white; border: none; padding: 12px 24px; border-radius: 8px;
+    font-size: 1rem; font-weight: 600; cursor: pointer; transition: all 0.3s ease;
+    display: flex; align-items: center; gap: 8px;
+}
+.comment-submit-btn:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(78, 84, 200, 0.3); }
+.comments-list { margin-top: 2rem; }
+.comment-item { background: white; border: 1px solid #e9ecef; border-radius: 10px; padding: 1.5rem; margin-bottom: 1rem; transition: all 0.3s ease; }
+.comment-item:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.1); transform: translateY(-2px); }
+.comment-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 1rem; flex-wrap: wrap; gap: 1rem; }
+.comment-author { display: flex; align-items: center; gap: 0.75rem; }
+.comment-avatar {
+    width: 40px; height: 40px; border-radius: 50%;
+    background: linear-gradient(135deg, #4e54c8 0%, #8f94fb 100%);
+    color: white; display: flex; align-items: center; justify-content: center;
+    font-weight: bold; font-size: 1.1rem;
+}
+.comment-author-info h4 { margin: 0; color: #2d334a; font-size: 1.1rem; }
+.comment-author-info .comment-date { color: #666; font-size: 0.85rem; margin-top: 0.25rem; }
+.comment-actions { display: flex; align-items: center; gap: 1rem; }
+.like-comment-btn {
+    background: none; border: 1px solid #e9ecef; color: #666;
+    padding: 6px 12px; border-radius: 6px; cursor: pointer;
+    transition: all 0.3s ease; display: flex; align-items: center;
+    gap: 6px; font-size: 0.9rem;
+}
+.like-comment-btn:hover { border-color: #4e54c8; color: #4e54c8; }
+.like-comment-btn.liked { background: #ffeaea; border-color: #ff6b6b; color: #ff6b6b; }
+.comment-content { color: #2d334a; line-height: 1.6; margin: 0; white-space: pre-wrap; word-wrap: break-word; }
+.comment-stats { display: flex; gap: 1rem; margin-top: 1rem; color: #666; font-size: 0.9rem; }
+.load-more-comments { text-align: center; margin-top: 2rem; }
+.load-more-btn {
+    background: #f8f9fa; border: 2px solid #4e54c8; color: #4e54c8;
+    padding: 10px 20px; border-radius: 8px; cursor: pointer;
+    font-weight: 600; transition: all 0.3s ease;
+}
+.load-more-btn:hover { background: #4e54c8; color: white; }
+.no-comments { text-align: center; padding: 3rem; color: #666; background: #f8f9fa; border-radius: 10px; border: 2px dashed #ddd; }
+@media (max-width: 768px) {
+    .comment-section { padding: 1rem; }
+    .comment-header { flex-direction: column; gap: 0.75rem; }
+    .comment-author { width: 100%; }
+    .comment-actions { width: 100%; justify-content: flex-end; }
+    .comment-item { padding: 1rem; }
+    .comment-form { padding: 1rem; }
+}
+`;
+
 // Track app download clicks endpoint
 app.post('/api/track-download', async (req, res) => {
     try {
         const { promptId, promptTitle, userAgent } = req.body;
-        
         console.log(`📱 App download tracked - Prompt: ${promptTitle} (${promptId})`);
         console.log(`   User Agent: ${userAgent}`);
         console.log(`   Time: ${new Date().toISOString()}`);
-        
-        // Optional: Store in database if needed (keep this as it's a separate feature)
         if (db && db.collection) {
             await db.collection('downloads').add({
                 promptId: promptId || null,
@@ -524,7 +1097,6 @@ app.post('/api/track-download', async (req, res) => {
                 source: 'prompt_page'
             });
         }
-        
         res.json({ success: true });
     } catch (error) {
         console.error('Download tracking error:', error);
@@ -533,27 +1105,17 @@ app.post('/api/track-download', async (req, res) => {
 });
 
 // ==================== RAZORPAY ENDPOINTS ====================
-
-// Get Razorpay key
 app.get('/api/razorpay-key', (req, res) => {
-    res.json({ 
-        keyId: razorpayKeyId,
-        isDemo: !razorpay 
-    });
+    res.json({ keyId: razorpayKeyId, isDemo: !razorpay });
 });
 
-// Alternative - let Razorpay generate receipt automatically
 app.post('/api/create-order', async (req, res) => {
     try {
         const { promptId, price, userId, userEmail, customerName, customerPhone } = req.body;
-        
         console.log('Creating order for:', { promptId, price, userId });
-        
-        // Check if Razorpay is configured
         if (!razorpay || !process.env.RAZORPAY_KEY_SECRET) {
             console.log('Razorpay not configured, using demo mode');
             const demoOrderId = 'order_demo_' + Date.now();
-            
             return res.json({
                 success: true,
                 orderId: demoOrderId,
@@ -563,25 +1125,16 @@ app.post('/api/create-order', async (req, res) => {
                 keyId: razorpayKeyId || 'rzp_live_SXMEZ6fYLjDmzD'
             });
         }
-        
         const amount = Math.round(price * 100);
-        
-        // Remove receipt completely - let Razorpay generate it
         const options = {
             amount: amount,
             currency: 'INR',
-            notes: {
-                promptId: promptId,
-                userId: userId
-            },
+            notes: { promptId: promptId, userId: userId },
             payment_capture: 1
         };
-        
         console.log('Sending order request to Razorpay (no receipt)...');
         const order = await razorpay.orders.create(options);
-        
         console.log('Order created successfully:', order.id);
-        
         res.json({
             success: true,
             orderId: order.id,
@@ -590,11 +1143,8 @@ app.post('/api/create-order', async (req, res) => {
             isDemo: false,
             keyId: razorpayKeyId
         });
-        
     } catch (error) {
         console.error('Razorpay order creation error:', error);
-        
-        // Fallback to demo mode
         console.log('Falling back to demo mode due to error');
         res.json({
             success: true,
@@ -607,52 +1157,36 @@ app.post('/api/create-order', async (req, res) => {
     }
 });
 
-// Fix for /api/verify-payment endpoint
 app.post('/api/verify-payment', async (req, res) => {
     try {
         const { orderId, paymentId, signature, promptId, userId, userEmail, amount } = req.body;
-        
-        // Use razorpay variable (not razorpay)
         if (!razorpay) {
-            // Demo mode
             const purchaseResult = await completePurchaseHelper(promptId, userId, userEmail, amount, paymentId);
             return res.json(purchaseResult);
         }
-        
-        // Verify signature using the secret from env
         const crypto = require('crypto');
         const generatedSignature = crypto
-            .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)  // Use env variable
+            .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
             .update(orderId + '|' + paymentId)
             .digest('hex');
-        
         if (generatedSignature !== signature) {
             return res.status(400).json({ error: 'Invalid payment signature' });
         }
-        
-        // Payment verified
         const purchaseResult = await completePurchaseHelper(promptId, userId, userEmail, amount, paymentId);
         res.json(purchaseResult);
-        
     } catch (error) {
         console.error('Payment verification error:', error);
         res.status(500).json({ error: 'Failed to verify payment', details: error.message });
     }
 });
 
-
-// Helper function to complete purchase
 async function completePurchaseHelper(promptId, userId, userEmail, amount, paymentId) {
-    // Get prompt details
     let promptData;
     if (db && db.collection) {
         const promptDoc = await db.collection('uploads').doc(promptId).get();
-        if (!promptDoc.exists) {
-            throw new Error('Prompt not found');
-        }
+        if (!promptDoc.exists) throw new Error('Prompt not found');
         promptData = promptDoc.data();
     } else {
-        // Mock data fallback
         const mockPrompts = [
             {
                 id: 'demo-1',
@@ -695,27 +1229,15 @@ async function completePurchaseHelper(promptId, userId, userEmail, amount, payme
             }
         ];
         promptData = mockPrompts.find(p => p.id === promptId);
-        if (!promptData) {
-            throw new Error('Prompt not found');
-        }
+        if (!promptData) throw new Error('Prompt not found');
     }
-    
-    // Check if already purchased
     const purchasedBy = promptData.purchasedBy || [];
     if (purchasedBy.includes(userId)) {
-        return {
-            success: true,
-            message: 'Already purchased',
-            promptText: promptData.promptText
-        };
+        return { success: true, message: 'Already purchased', promptText: promptData.promptText };
     }
-    
-    // Get proper image URL
-    const imageUrl = promptData.thumbnailUrl || promptData.imageUrl || 
-                    (promptData.fileType === 'video' ? 'https://via.placeholder.com/300x400/ff6b6b/ffffff?text=Video+Reel' : 
+    const imageUrl = promptData.thumbnailUrl || promptData.imageUrl ||
+                    (promptData.fileType === 'video' ? 'https://via.placeholder.com/300x400/ff6b6b/ffffff?text=Video+Reel' :
                      'https://via.placeholder.com/800x400/4e54c8/ffffff?text=AI+Prompt');
-    
-    // Create purchase record
     const purchaseData = sanitizeFirestoreData({
         promptId: promptId,
         promptTitle: promptData.title || 'Untitled Prompt',
@@ -735,8 +1257,6 @@ async function completePurchaseHelper(promptId, userId, userEmail, amount, payme
         updatedAt: new Date().toISOString(),
         paymentStatus: 'completed'
     });
-    
-    // Create sale record
     const saleData = sanitizeFirestoreData({
         promptId: promptId,
         promptTitle: promptData.title || 'Untitled Prompt',
@@ -755,20 +1275,15 @@ async function completePurchaseHelper(promptId, userId, userEmail, amount, payme
         updatedAt: new Date().toISOString(),
         paymentStatus: 'completed'
     });
-    
-    // Store in database
     if (db && db.collection) {
         await db.collection('purchases').add(purchaseData);
         console.log('✅ Purchase record saved for user:', userId, 'prompt:', promptId);
-        
         await db.collection('sales').add(saleData);
         console.log('✅ Sale record saved for seller:', promptData.userId);
-        
         const promptRef = db.collection('uploads').doc(promptId);
         const currentSalesCount = promptData.salesCount || 0;
         const currentEarnings = promptData.totalEarnings || 0;
         const updatedPurchasedBy = [...(promptData.purchasedBy || []), userId];
-        
         await promptRef.update(sanitizeFirestoreData({
             salesCount: currentSalesCount + 1,
             totalEarnings: currentEarnings + (amount || promptData.price || 0),
@@ -779,12 +1294,10 @@ async function completePurchaseHelper(promptId, userId, userEmail, amount, payme
     } else {
         console.log('Purchase recorded (demo mode):', purchaseData);
         console.log('Sale recorded (demo mode):', saleData);
-        
         promptData.salesCount = (promptData.salesCount || 0) + 1;
         promptData.totalEarnings = (promptData.totalEarnings || 0) + (amount || promptData.price || 0);
         promptData.purchasedBy = [...(promptData.purchasedBy || []), userId];
     }
-    
     return {
         success: true,
         message: 'Purchase completed successfully',
@@ -792,36 +1305,28 @@ async function completePurchaseHelper(promptId, userId, userEmail, amount, payme
     };
 }
 
-// Razorpay Webhook endpoint
 app.post('/api/razorpay-webhook', async (req, res) => {
     if (!razorpay) return res.json({ received: true });
-    
-    const secret = process.env.RAZORPAY_WEBHOOK_SECRET;  // ← Use env variable
+    const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
     const signature = req.headers['x-razorpay-signature'];
-    
     if (secret && signature) {
         const crypto = require('crypto');
         const expectedSignature = crypto
             .createHmac('sha256', secret)
             .update(JSON.stringify(req.body))
             .digest('hex');
-        
         if (expectedSignature !== signature) {
             console.error('Invalid webhook signature');
             return res.status(400).send('Invalid signature');
         }
     }
-    
     const event = req.body;
-    
     switch (event.event) {
         case 'payment.captured':
             const payment = event.payload.payment.entity;
             console.log('Payment captured:', payment.id);
-            
             const { promptId, userId, userEmail } = payment.notes || {};
             const amount = payment.amount / 100;
-            
             if (promptId && userId) {
                 try {
                     await completePurchaseHelper(promptId, userId, userEmail, amount, payment.id);
@@ -830,81 +1335,54 @@ app.post('/api/razorpay-webhook', async (req, res) => {
                 }
             }
             break;
-            
         case 'payment.failed':
             console.log('Payment failed:', event.payload.payment.entity.id);
             break;
     }
-    
     res.json({ received: true });
 });
 
-// Enhanced HTML serving with canonical support
 function serveHTMLWithCanonical(filePath, requestedPath, req, res) {
   fs.readFile(filePath, 'utf8', (err, html) => {
     if (err) {
       console.error('Error reading HTML file:', err);
       return res.status(500).send('Error loading page');
     }
-    
     const baseUrl = process.env.BASE_URL || `https://${req.get('host')}`;
     let canonicalUrl = baseUrl + requestedPath;
-    
-    if (requestedPath === '/index.html') {
-      canonicalUrl = baseUrl + '/';
-    }
-    
+    if (requestedPath === '/index.html') canonicalUrl = baseUrl + '/';
     const canonicalTag = `<link rel="canonical" href="${canonicalUrl}" />`;
     const modifiedHTML = html.replace('</head>', `${canonicalTag}</head>`);
-    
     res.set('Content-Type', 'text/html');
     res.send(modifiedHTML);
   });
 }
 
-// Serve main page with canonical support
 app.get('/', (req, res) => {
-  serveHTMLWithCanonical(path.join(__dirname, 'index.html'), '/', req, res);
+  res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-// Serve index.html as separate page with proper canonical
 app.get('/index.html', (req, res) => {
-    if (req.get('host').includes('toolsprompt.com') || process.env.NODE_ENV === 'production') {
-        const baseUrl = process.env.BASE_URL || `https://${req.get('host').replace('index.html', '')}`;
-        return res.redirect(301, baseUrl.replace('/index.html', '/'));
-    }
-    
-    serveHTMLWithCanonical(path.join(__dirname, 'index.html'), '/index.html', req, res);
+    const baseUrl = process.env.BASE_URL || `https://${req.get('host')}`;
+    res.redirect(301, baseUrl + '/');
 });
 
-// ENHANCED AdSense Helper Functions
 class AdSenseManager {
   static generateAutoAdsCode() {
     const clientId = process.env.ADSENSE_CLIENT_ID || 'ca-pub-5992381116749724';
-    
     return `
-      <!-- Google AdSense Auto Ads -->
       <script>
         (function() {
-          if (window.adsbygoogle && window.adsbygoogle.loaded) {
-            console.log('AdSense already loaded, skipping...');
-            return;
-          }
-          
+          if (window.adsbygoogle && window.adsbygoogle.loaded) { return; }
           window.adsbygoogle = window.adsbygoogle || [];
           window.adsbygoogle.loaded = true;
-          
           var script = document.createElement('script');
           script.async = true;
           script.src = 'https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${clientId}';
           script.crossOrigin = 'anonymous';
           script.onload = function() {
             if (!window.adsbygoogle.initialized) {
-              window.adsbygoogle.push({
-                google_ad_client: "${clientId}",
-                enable_page_level_ads: true,
-                overlays: {bottom: true}
-              });
+              window.adsbygoogle.push({ google_ad_client: "${clientId}", enable_page_level_ads: true, overlays: {bottom: true} });
               window.adsbygoogle.initialized = true;
             }
           };
@@ -916,26 +1394,15 @@ class AdSenseManager {
 
   static generateManualAd(adSlot = 'default') {
     const clientId = process.env.ADSENSE_CLIENT_ID || 'ca-pub-5992381116749724';
-    
     return `
-      <!-- Manual Ad Placement -->
       <div class="ad-container">
         <div class="ad-label">Advertisement</div>
-        <ins class="adsbygoogle"
-            style="display:block"
-            data-ad-client="${clientId}"
-            data-ad-slot="${adSlot}"
-            data-ad-format="auto"
-            data-full-width-responsive="true"></ins>
+        <ins class="adsbygoogle" style="display:block" data-ad-client="${clientId}" data-ad-slot="${adSlot}" data-ad-format="auto" data-full-width-responsive="true"></ins>
         <script>
           (function() {
             function initAd() {
-              if (window.adsbygoogle && !window.adsbygoogle.pushed) {
-                (adsbygoogle = window.adsbygoogle || []).push({});
-                window.adsbygoogle.pushed = true;
-              } else {
-                setTimeout(initAd, 100);
-              }
+              if (window.adsbygoogle && !window.adsbygoogle.pushed) { (adsbygoogle = window.adsbygoogle || []).push({}); window.adsbygoogle.pushed = true; }
+              else { setTimeout(initAd, 100); }
             }
             initAd();
           })();
@@ -946,64 +1413,38 @@ class AdSenseManager {
 
   static generatePromptPageAds() {
     const clientId = process.env.ADSENSE_CLIENT_ID || 'ca-pub-5992381116749724';
-    
     return `
-      <!-- Manual Ad Placement for Prompt Pages -->
       <div class="ad-container">
         <div class="ad-label">Advertisement</div>
-        <ins class="adsbygoogle"
-            style="display:block"
-            data-ad-client="${clientId}"
-            data-ad-slot="3256783957"
-            data-ad-format="auto"
-            data-full-width-responsive="true"></ins>
-        <script>
-          (adsbygoogle = window.adsbygoogle || []).push({});
-        </script>
+        <ins class="adsbygoogle" style="display:block" data-ad-client="${clientId}" data-ad-slot="3256783957" data-ad-format="auto" data-full-width-responsive="true"></ins>
+        <script>(adsbygoogle = window.adsbygoogle || []).push({});</script>
       </div>
     `;
   }
 }
 
-function generateAdSenseCode() {
-  return AdSenseManager.generateAutoAdsCode();
-}
+function generateAdSenseCode() { return AdSenseManager.generateAutoAdsCode(); }
+function generateManualAdPlacement(adUnit = 'default') { return AdSenseManager.generateManualAd(adUnit); }
+function generatePromptAdPlacement() { return AdSenseManager.generatePromptPageAds(); }
 
-function generateManualAdPlacement(adUnit = 'default') {
-  return AdSenseManager.generateManualAd(adUnit);
-}
-
-function generatePromptAdPlacement() {
-  return AdSenseManager.generatePromptPageAds();
-}
-
-// Migration function for existing prompts
 async function migrateExistingPromptsForAdSense() {
   try {
     console.log('🔄 Starting AdSense migration for existing prompts...');
-    
     if (db && db.collection) {
-      const snapshot = await db.collection('uploads')
-        .limit(500)
-        .get();
-      
+      const snapshot = await db.collection('uploads').limit(500).get();
       let migratedCount = 0;
-      
       for (const doc of snapshot.docs) {
         const promptData = doc.data();
-        
         if (!promptData.adsenseMigrated) {
           await db.collection('uploads').doc(doc.id).update({
             adsenseMigrated: true,
             migratedAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
           });
-          
           migratedCount++;
           console.log(`✅ Migrated prompt: ${doc.id}`);
         }
       }
-      
       console.log(`🎉 AdSense migration completed! Migrated ${migratedCount} prompts.`);
       return migratedCount;
     } else {
@@ -1016,38 +1457,26 @@ async function migrateExistingPromptsForAdSense() {
   }
 }
 
-// SEO Optimization Class
 class SEOOptimizer {
   static generateSEOTitle(promptTitle) {
     const keywords = this.extractKeywords(promptTitle);
     const baseTitle = `AI Prompt: ${promptTitle} - tools prompt`;
     return keywords.length > 0 ? `${keywords.slice(0, 3).join(', ')} | ${baseTitle}` : baseTitle;
   }
-
   static generateMetaDescription(promptText, title) {
     const cleanText = promptText.replace(/[^\w\s]/gi, ' ').substring(0, 155);
     return `${cleanText}... Explore this AI-generated content and learn prompt engineering techniques.`;
   }
-
   static extractKeywords(text) {
     if (!text) return [];
     const commonWords = new Set(['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by']);
-    const words = text.toLowerCase()
-      .replace(/[^\w\s]/g, '')
-      .split(/\s+/)
-      .filter(word => word.length > 2 && !commonWords.has(word));
-    
+    const words = text.toLowerCase().replace(/[^\w\s]/g, '').split(/\s+/).filter(word => word.length > 2 && !commonWords.has(word));
     return [...new Set(words)];
   }
-
   static generateSlug(title) {
     if (!title) return 'untitled-prompt';
-    return title.toLowerCase()
-      .replace(/[^\w\s]/g, '')
-      .replace(/\s+/g, '-')
-      .substring(0, 60);
+    return title.toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, '-').substring(0, 60);
   }
-
   static generateStructuredData(prompt) {
     return {
       "@context": "https://schema.org",
@@ -1055,785 +1484,106 @@ class SEOOptimizer {
       "name": prompt.title || 'Untitled Prompt',
       "description": prompt.metaDescription || 'AI-generated prompt',
       "image": prompt.imageUrl || 'https://via.placeholder.com/800x400/4e54c8/white?text=AI+Image',
-      "author": {
-        "@type": "Person",
-        "name": prompt.userName || "tools prompt User"
-      },
+      "author": { "@type": "Person", "name": prompt.userName || "tools prompt User" },
       "datePublished": prompt.createdAt || new Date().toISOString(),
       "keywords": (prompt.keywords || ['AI', 'prompt']).join(', '),
-      "mainEntityOfPage": {
-        "@type": "WebPage",
-        "@id": `https://www.toolsprompt.com/prompt/${prompt.id || 'unknown'}`
-      }
+      "mainEntityOfPage": { "@type": "WebPage", "@id": `https://www.toolsprompt.com/prompt/${prompt.id || 'unknown'}` }
     };
   }
 }
 
 // ========== 25+ AI PHOTO EDITING MODELS ==========
 const AI_PHOTO_MODELS = {
-  'google-imagen': {
-    name: 'Google Imagen 3',
-    description: 'Google\'s most advanced text-to-image model with photorealistic quality',
-    strengths: ['photorealistic', 'detailed rendering', 'text integration'],
-    bestFor: 'Photorealistic images, product visualization',
-    price: 'Free/Paid tiers',
-    releaseDate: '2025',
-    category: 'professional'
-  },
-  'gemini-image': {
-    name: 'Gemini Image Generation',
-    description: 'Google Gemini\'s integrated image generation with multimodal understanding',
-    strengths: ['multimodal', 'contextual understanding', 'fast generation'],
-    bestFor: 'Concept art, rapid prototyping',
-    price: 'Free/Paid tiers',
-    releaseDate: '2025',
-    category: 'versatile'
-  },
-  'dalle-3': {
-    name: 'DALL-E 3',
-    description: 'OpenAI\'s leading image generation model with exceptional prompt comprehension',
-    strengths: ['prompt accuracy', 'creative composition', 'detail'],
-    bestFor: 'Artistic creations, marketing visuals',
-    price: 'Credits system',
-    releaseDate: '2025',
-    category: 'professional'
-  },
-  'dalle-2': {
-    name: 'DALL-E 2',
-    description: 'Advanced image generation with inpainting and variations',
-    strengths: ['inpainting', 'variations', 'editing'],
-    bestFor: 'Image editing, variations',
-    price: 'Credits system',
-    releaseDate: '2024',
-    category: 'versatile'
-  },
-  'midjourney-v6': {
-    name: 'Midjourney V6',
-    description: 'Premium artistic image generation with unparalleled style control',
-    strengths: ['artistic styles', 'composition', 'community'],
-    bestFor: 'Digital art, concept art, fantasy',
-    price: 'Paid subscription',
-    releaseDate: '2025',
-    category: 'artistic'
-  },
-  'midjourney-niji': {
-    name: 'Midjourney Niji',
-    description: 'Anime and illustration-focused version of Midjourney',
-    strengths: ['anime', 'illustration', 'stylized'],
-    bestFor: 'Anime art, manga, illustrations',
-    price: 'Paid subscription',
-    releaseDate: '2025',
-    category: 'artistic'
-  },
-  'stable-diffusion-3': {
-    name: 'Stable Diffusion 3',
-    description: 'Latest open-source image generation with improved quality and control',
-    strengths: ['open-source', 'fine-tuning', 'control'],
-    bestFor: 'Custom models, research, local generation',
-    price: 'Free/Paid',
-    releaseDate: '2025',
-    category: 'open-source'
-  },
-  'stable-diffusion-xl': {
-    name: 'Stable Diffusion XL',
-    description: 'High-quality image generation with base/refiner models',
-    strengths: ['high resolution', 'refiner', 'control'],
-    bestFor: 'Professional projects, high-res images',
-    price: 'Free/Paid',
-    releaseDate: '2024',
-    category: 'professional'
-  },
-  'sd-xl-turbo': {
-    name: 'SDXL Turbo',
-    description: 'Real-time image generation with reduced steps',
-    strengths: ['real-time', 'fast', 'efficient'],
-    bestFor: 'Rapid prototyping, real-time applications',
-    price: 'Free/Paid',
-    releaseDate: '2024',
-    category: 'real-time'
-  },
-  'adobe-firefly-image': {
-    name: 'Adobe Firefly Image',
-    description: 'Adobe\'s commercial-safe image generation with Creative Cloud integration',
-    strengths: ['commercial safe', 'Adobe integration', 'professional'],
-    bestFor: 'Commercial projects, design work',
-    price: 'Adobe subscription',
-    releaseDate: '2025',
-    category: 'professional'
-  },
-  'photoshop-generative': {
-    name: 'Photoshop Generative Fill',
-    description: 'AI-powered image editing directly in Photoshop',
-    strengths: ['generative fill', 'inpainting', 'editing'],
-    bestFor: 'Photo editing, retouching',
-    price: 'Adobe subscription',
-    releaseDate: '2025',
-    category: 'editing'
-  },
-  'canva-ai': {
-    name: 'Canva AI',
-    description: 'Integrated AI image generation for design projects',
-    strengths: ['templates', 'design integration', 'easy'],
-    bestFor: 'Social media graphics, presentations',
-    price: 'Free/Pro',
-    releaseDate: '2025',
-    category: 'design'
-  },
-  'canva-magic-media': {
-    name: 'Canva Magic Media',
-    description: 'Text-to-image and text-to-video in Canva',
-    strengths: ['versatile', 'templates', 'integration'],
-    bestFor: 'Design projects, marketing',
-    price: 'Free/Pro',
-    releaseDate: '2025',
-    category: 'design'
-  },
-  'leonardo-creative': {
-    name: 'Leonardo Creative',
-    description: 'Professional art generation with style consistency',
-    strengths: ['style consistency', 'professional', 'commercial'],
-    bestFor: 'Professional art, commercial projects',
-    price: 'Token system',
-    releaseDate: '2025',
-    category: 'professional'
-  },
-  'leonardo-phoenix': {
-    name: 'Leonardo Phoenix',
-    description: 'Latest Leonardo model with enhanced quality',
-    strengths: ['quality', 'speed', 'control'],
-    bestFor: 'High-quality art, illustrations',
-    price: 'Token system',
-    releaseDate: '2025',
-    category: 'professional'
-  },
-  'ideogram-2': {
-    name: 'Ideogram 2.0',
-    description: 'AI image generation with exceptional typography',
-    strengths: ['typography', 'text rendering', 'design'],
-    bestFor: 'Graphic design, text-heavy images',
-    price: 'Free/Paid',
-    releaseDate: '2025',
-    category: 'design'
-  },
-  'playground-v2': {
-    name: 'Playground AI V2',
-    description: 'Versatile image generation with fine-tuning options',
-    strengths: ['fine-tuning', 'style mixing', 'easy'],
-    bestFor: 'Creative exploration, experimentation',
-    price: 'Free/Paid',
-    releaseDate: '2024',
-    category: 'creative'
-  },
-  'clipdrop-replace': {
-    name: 'ClipDrop Replace',
-    description: 'AI image editing with object replacement',
-    strengths: ['object replacement', 'background removal', 'practical'],
-    bestFor: 'Product photography, e-commerce',
-    price: 'Free/Paid',
-    releaseDate: '2024',
-    category: 'editing'
-  },
-  'runway-image': {
-    name: 'Runway Image Generation',
-    description: 'Integrated image generation in Runway platform',
-    strengths: ['integration', 'video synergy', 'professional'],
-    bestFor: 'Multi-modal projects, video+image',
-    price: 'Subscription',
-    releaseDate: '2025',
-    category: 'professional'
-  },
-  'nightcafe-creator': {
-    name: 'NightCafe Creator',
-    description: 'Multiple AI algorithms in one platform',
-    strengths: ['multiple algorithms', 'community', 'styles'],
-    bestFor: 'Artistic exploration, community engagement',
-    price: 'Credit system',
-    releaseDate: '2025',
-    category: 'artistic'
-  },
-  'wombo-dream': {
-    name: 'Wombo Dream',
-    description: 'Mobile-first AI art generation',
-    strengths: ['mobile', 'artistic styles', 'quick'],
-    bestFor: 'Mobile creation, quick art',
-    price: 'Free/Paid',
-    releaseDate: '2024',
-    category: 'mobile'
-  },
-  'starryai': {
-    name: 'StarryAI',
-    description: 'NFT-focused AI art generation',
-    strengths: ['NFT', 'ownership rights', 'mobile'],
-    bestFor: 'NFT creation, digital collectibles',
-    price: 'Token system',
-    releaseDate: '2024',
-    category: 'nft'
-  },
-  'deepai': {
-    name: 'DeepAI',
-    description: 'Classic AI image generation with various models',
-    strengths: ['multiple models', 'API access', 'simple'],
-    bestFor: 'Quick generation, API integration',
-    price: 'Free/Paid',
-    releaseDate: '2024',
-    category: 'versatile'
-  },
-  'craiyon-v3': {
-    name: 'Craiyon V3',
-    description: 'Free AI image generation with improved quality',
-    strengths: ['completely free', 'simple', 'no signup'],
-    bestFor: 'Quick testing, casual use',
-    price: 'Free',
-    releaseDate: '2025',
-    category: 'free'
-  },
-  'bing-creator': {
-    name: 'Bing Image Creator',
-    description: 'Free DALL-E powered image generation',
-    strengths: ['free DALL-E', 'Microsoft integration', 'daily credits'],
-    bestFor: 'Free generation, quick results',
-    price: 'Free',
-    releaseDate: '2025',
-    category: 'free'
-  },
-  'getty-generative': {
-    name: 'Getty Generative AI',
-    description: 'Commercial-safe AI images with legal protection',
-    strengths: ['legal protection', 'commercial safe', 'royalty-free'],
-    bestFor: 'Commercial use, licensed content',
-    price: 'Paid',
-    releaseDate: '2024',
-    category: 'commercial'
-  },
-  'shutterstock-ai': {
-    name: 'Shutterstock AI',
-    description: 'AI image generation with stock library integration',
-    strengths: ['stock integration', 'commercial', 'variety'],
-    bestFor: 'Stock content, commercial projects',
-    price: 'Paid',
-    releaseDate: '2024',
-    category: 'commercial'
-  },
-  'picsart-ai': {
-    name: 'Picsart AI',
-    description: 'AI image generation with editing tools',
-    strengths: ['editing tools', 'social features', 'filters'],
-    bestFor: 'Social media content, quick edits',
-    price: 'Free/Paid',
-    releaseDate: '2024',
-    category: 'editing'
-  },
-  'fotor-ai': {
-    name: 'Fotor AI',
-    description: 'AI image generation with photo editing',
-    strengths: ['photo editing', 'templates', 'easy'],
-    bestFor: 'Photo enhancement, quick edits',
-    price: 'Free/Paid',
-    releaseDate: '2024',
-    category: 'editing'
-  },
-  'bluewillow-v4': {
-    name: 'BlueWillow V4',
-    description: 'Free Discord-based AI art generation',
-    strengths: ['free', 'Discord community', 'rapid'],
-    bestFor: 'Community art, free generation',
-    price: 'Free',
-    releaseDate: '2024',
-    category: 'free'
-  },
-  'tensorart': {
-    name: 'TensorArt',
-    description: 'Free AI image generation with multiple models',
-    strengths: ['multiple models', 'free credits', 'community'],
-    bestFor: 'Model experimentation, free generation',
-    price: 'Free/Paid',
-    releaseDate: '2025',
-    category: 'versatile'
-  },
-  'seaart': {
-    name: 'SeaArt',
-    description: 'AI art platform with various styles',
-    strengths: ['style variety', 'community', 'easy'],
-    bestFor: 'Style exploration, community art',
-    price: 'Free/Paid',
-    releaseDate: '2024',
-    category: 'artistic'
-  }
+  'google-imagen': { name: 'Google Imagen 3', description: 'Google\'s most advanced text-to-image model with photorealistic quality', strengths: ['photorealistic', 'detailed rendering', 'text integration'], bestFor: 'Photorealistic images, product visualization', price: 'Free/Paid tiers', releaseDate: '2025', category: 'professional' },
+  'gemini-image': { name: 'Gemini Image Generation', description: 'Google Gemini\'s integrated image generation with multimodal understanding', strengths: ['multimodal', 'contextual understanding', 'fast generation'], bestFor: 'Concept art, rapid prototyping', price: 'Free/Paid tiers', releaseDate: '2025', category: 'versatile' },
+  'dalle-3': { name: 'DALL-E 3', description: 'OpenAI\'s leading image generation model with exceptional prompt comprehension', strengths: ['prompt accuracy', 'creative composition', 'detail'], bestFor: 'Artistic creations, marketing visuals', price: 'Credits system', releaseDate: '2025', category: 'professional' },
+  'dalle-2': { name: 'DALL-E 2', description: 'Advanced image generation with inpainting and variations', strengths: ['inpainting', 'variations', 'editing'], bestFor: 'Image editing, variations', price: 'Credits system', releaseDate: '2024', category: 'versatile' },
+  'midjourney-v6': { name: 'Midjourney V6', description: 'Premium artistic image generation with unparalleled style control', strengths: ['artistic styles', 'composition', 'community'], bestFor: 'Digital art, concept art, fantasy', price: 'Paid subscription', releaseDate: '2025', category: 'artistic' },
+  'midjourney-niji': { name: 'Midjourney Niji', description: 'Anime and illustration-focused version of Midjourney', strengths: ['anime', 'illustration', 'stylized'], bestFor: 'Anime art, manga, illustrations', price: 'Paid subscription', releaseDate: '2025', category: 'artistic' },
+  'stable-diffusion-3': { name: 'Stable Diffusion 3', description: 'Latest open-source image generation with improved quality and control', strengths: ['open-source', 'fine-tuning', 'control'], bestFor: 'Custom models, research, local generation', price: 'Free/Paid', releaseDate: '2025', category: 'open-source' },
+  'stable-diffusion-xl': { name: 'Stable Diffusion XL', description: 'High-quality image generation with base/refiner models', strengths: ['high resolution', 'refiner', 'control'], bestFor: 'Professional projects, high-res images', price: 'Free/Paid', releaseDate: '2024', category: 'professional' },
+  'sd-xl-turbo': { name: 'SDXL Turbo', description: 'Real-time image generation with reduced steps', strengths: ['real-time', 'fast', 'efficient'], bestFor: 'Rapid prototyping, real-time applications', price: 'Free/Paid', releaseDate: '2024', category: 'real-time' },
+  'adobe-firefly-image': { name: 'Adobe Firefly Image', description: 'Adobe\'s commercial-safe image generation with Creative Cloud integration', strengths: ['commercial safe', 'Adobe integration', 'professional'], bestFor: 'Commercial projects, design work', price: 'Adobe subscription', releaseDate: '2025', category: 'professional' },
+  'photoshop-generative': { name: 'Photoshop Generative Fill', description: 'AI-powered image editing directly in Photoshop', strengths: ['generative fill', 'inpainting', 'editing'], bestFor: 'Photo editing, retouching', price: 'Adobe subscription', releaseDate: '2025', category: 'editing' },
+  'canva-ai': { name: 'Canva AI', description: 'Integrated AI image generation for design projects', strengths: ['templates', 'design integration', 'easy'], bestFor: 'Social media graphics, presentations', price: 'Free/Pro', releaseDate: '2025', category: 'design' },
+  'canva-magic-media': { name: 'Canva Magic Media', description: 'Text-to-image and text-to-video in Canva', strengths: ['versatile', 'templates', 'integration'], bestFor: 'Design projects, marketing', price: 'Free/Pro', releaseDate: '2025', category: 'design' },
+  'leonardo-creative': { name: 'Leonardo Creative', description: 'Professional art generation with style consistency', strengths: ['style consistency', 'professional', 'commercial'], bestFor: 'Professional art, commercial projects', price: 'Token system', releaseDate: '2025', category: 'professional' },
+  'leonardo-phoenix': { name: 'Leonardo Phoenix', description: 'Latest Leonardo model with enhanced quality', strengths: ['quality', 'speed', 'control'], bestFor: 'High-quality art, illustrations', price: 'Token system', releaseDate: '2025', category: 'professional' },
+  'ideogram-2': { name: 'Ideogram 2.0', description: 'AI image generation with exceptional typography', strengths: ['typography', 'text rendering', 'design'], bestFor: 'Graphic design, text-heavy images', price: 'Free/Paid', releaseDate: '2025', category: 'design' },
+  'playground-v2': { name: 'Playground AI V2', description: 'Versatile image generation with fine-tuning options', strengths: ['fine-tuning', 'style mixing', 'easy'], bestFor: 'Creative exploration, experimentation', price: 'Free/Paid', releaseDate: '2024', category: 'creative' },
+  'clipdrop-replace': { name: 'ClipDrop Replace', description: 'AI image editing with object replacement', strengths: ['object replacement', 'background removal', 'practical'], bestFor: 'Product photography, e-commerce', price: 'Free/Paid', releaseDate: '2024', category: 'editing' },
+  'runway-image': { name: 'Runway Image Generation', description: 'Integrated image generation in Runway platform', strengths: ['integration', 'video synergy', 'professional'], bestFor: 'Multi-modal projects, video+image', price: 'Subscription', releaseDate: '2025', category: 'professional' },
+  'nightcafe-creator': { name: 'NightCafe Creator', description: 'Multiple AI algorithms in one platform', strengths: ['multiple algorithms', 'community', 'styles'], bestFor: 'Artistic exploration, community engagement', price: 'Credit system', releaseDate: '2025', category: 'artistic' },
+  'wombo-dream': { name: 'Wombo Dream', description: 'Mobile-first AI art generation', strengths: ['mobile', 'artistic styles', 'quick'], bestFor: 'Mobile creation, quick art', price: 'Free/Paid', releaseDate: '2024', category: 'mobile' },
+  'starryai': { name: 'StarryAI', description: 'NFT-focused AI art generation', strengths: ['NFT', 'ownership rights', 'mobile'], bestFor: 'NFT creation, digital collectibles', price: 'Token system', releaseDate: '2024', category: 'nft' },
+  'deepai': { name: 'DeepAI', description: 'Classic AI image generation with various models', strengths: ['multiple models', 'API access', 'simple'], bestFor: 'Quick generation, API integration', price: 'Free/Paid', releaseDate: '2024', category: 'versatile' },
+  'craiyon-v3': { name: 'Craiyon V3', description: 'Free AI image generation with improved quality', strengths: ['completely free', 'simple', 'no signup'], bestFor: 'Quick testing, casual use', price: 'Free', releaseDate: '2025', category: 'free' },
+  'bing-creator': { name: 'Bing Image Creator', description: 'Free DALL-E powered image generation', strengths: ['free DALL-E', 'Microsoft integration', 'daily credits'], bestFor: 'Free generation, quick results', price: 'Free', releaseDate: '2025', category: 'free' },
+  'getty-generative': { name: 'Getty Generative AI', description: 'Commercial-safe AI images with legal protection', strengths: ['legal protection', 'commercial safe', 'royalty-free'], bestFor: 'Commercial use, licensed content', price: 'Paid', releaseDate: '2024', category: 'commercial' },
+  'shutterstock-ai': { name: 'Shutterstock AI', description: 'AI image generation with stock library integration', strengths: ['stock integration', 'commercial', 'variety'], bestFor: 'Stock content, commercial projects', price: 'Paid', releaseDate: '2024', category: 'commercial' },
+  'picsart-ai': { name: 'Picsart AI', description: 'AI image generation with editing tools', strengths: ['editing tools', 'social features', 'filters'], bestFor: 'Social media content, quick edits', price: 'Free/Paid', releaseDate: '2024', category: 'editing' },
+  'fotor-ai': { name: 'Fotor AI', description: 'AI image generation with photo editing', strengths: ['photo editing', 'templates', 'easy'], bestFor: 'Photo enhancement, quick edits', price: 'Free/Paid', releaseDate: '2024', category: 'editing' },
+  'bluewillow-v4': { name: 'BlueWillow V4', description: 'Free Discord-based AI art generation', strengths: ['free', 'Discord community', 'rapid'], bestFor: 'Community art, free generation', price: 'Free', releaseDate: '2024', category: 'free' },
+  'tensorart': { name: 'TensorArt', description: 'Free AI image generation with multiple models', strengths: ['multiple models', 'free credits', 'community'], bestFor: 'Model experimentation, free generation', price: 'Free/Paid', releaseDate: '2025', category: 'versatile' },
+  'seaart': { name: 'SeaArt', description: 'AI art platform with various styles', strengths: ['style variety', 'community', 'easy'], bestFor: 'Style exploration, community art', price: 'Free/Paid', releaseDate: '2024', category: 'artistic' }
 };
 
 // ========== 25+ AI VIDEO EDITING MODELS ==========
 const AI_VIDEO_MODELS = {
-  'google-veo-2': {
-    name: 'Google Veo 2',
-    description: 'Google\'s most advanced video generation model with 4K quality',
-    strengths: ['4K video', 'prompt consistency', 'professional quality'],
-    bestFor: 'Professional video creation, marketing content',
-    price: 'Free (Limited) / Paid',
-    releaseDate: '2025',
-    category: 'professional'
-  },
-  'google-flow': {
-    name: 'Google Flow',
-    description: 'Google\'s real-time video editing AI with intelligent scene analysis',
-    strengths: ['real-time editing', 'scene detection', 'smart transitions'],
-    bestFor: 'Real-time video editing, live content',
-    price: 'Included with Workspace',
-    releaseDate: '2025',
-    category: 'real-time'
-  },
-  'gemini-video': {
-    name: 'Gemini 2.0 Video',
-    description: 'Google Gemini\'s multimodal video understanding and generation',
-    strengths: ['multimodal understanding', 'video analysis', 'script-to-video'],
-    bestFor: 'Content analysis, automated editing',
-    price: 'API pricing',
-    releaseDate: '2025',
-    category: 'analysis'
-  },
-  'video-poet': {
-    name: 'VideoPoet',
-    description: 'Google\'s large language model for video generation',
-    strengths: ['zero-shot', 'video stylization', 'audio generation'],
-    bestFor: 'Experimental video, creative projects',
-    price: 'Research preview',
-    releaseDate: '2024',
-    category: 'experimental'
-  },
-  'openai-sora': {
-    name: 'OpenAI Sora',
-    description: 'State-of-the-art text-to-video with photorealistic quality',
-    strengths: ['photorealistic', 'complex scenes', 'natural motion'],
-    bestFor: 'High-end video production, cinematic projects',
-    price: 'Not publicly available',
-    releaseDate: '2025',
-    category: 'professional'
-  },
-  'chatgpt-4o-video': {
-    name: 'ChatGPT-4o Video',
-    description: 'GPT-4o\'s integrated video understanding and generation',
-    strengths: ['real-time editing', 'multimodal', 'conversational'],
-    bestFor: 'Interactive video editing, content creation',
-    price: 'ChatGPT Plus',
-    releaseDate: '2025',
-    category: 'interactive'
-  },
-  'dalle-video': {
-    name: 'DALL-E Video',
-    description: 'Video generation based on DALL-E\'s prompt understanding',
-    strengths: ['prompt accuracy', 'artistic styles', 'creative control'],
-    bestFor: 'Artistic video creation, experimental',
-    price: 'Credits system',
-    releaseDate: '2025',
-    category: 'artistic'
-  },
-  'meta-movie-gen': {
-    name: 'Meta Movie Gen',
-    description: 'Meta\'s advanced video generation with audio synthesis',
-    strengths: ['audio generation', 'long-form video', 'character consistency'],
-    bestFor: 'Long-form content, character animation',
-    price: 'Research preview',
-    releaseDate: '2025',
-    category: 'long-form'
-  },
-  'make-a-video': {
-    name: 'Make-A-Video',
-    description: 'Meta\'s text-to-video model with motion understanding',
-    strengths: ['motion understanding', 'style transfer', 'quick generation'],
-    bestFor: 'Rapid prototyping, motion experiments',
-    price: 'Research preview',
-    releaseDate: '2024',
-    category: 'rapid'
-  },
-  'emu-video': {
-    name: 'Emu Video',
-    description: 'Meta\'s video generation model based on Emu',
-    strengths: ['quality', 'style control', 'factorized diffusion'],
-    bestFor: 'Factorized video generation, style control',
-    price: 'Research preview',
-    releaseDate: '2024',
-    category: 'experimental'
-  },
-  'runway-gen-3': {
-    name: 'Runway Gen-3',
-    description: 'Latest Runway video generation with advanced controls',
-    strengths: ['multi-shot', 'inpainting', 'professional tools'],
-    bestFor: 'Professional video editing, post-production',
-    price: 'Subscription',
-    releaseDate: '2025',
-    category: 'professional'
-  },
-  'runway-gen-2': {
-    name: 'Runway Gen-2',
-    description: 'Text-to-video and video-to-video generation',
-    strengths: ['style transfer', 'motion brush', 'real-time preview'],
-    bestFor: 'Creative experimentation, style transfer',
-    price: 'Credits system',
-    releaseDate: '2024',
-    category: 'creative'
-  },
-  'runway-frame-interpolation': {
-    name: 'Runway Frame Interpolation',
-    description: 'Smooth slow-motion and frame interpolation',
-    strengths: ['slow motion', 'smooth transitions', 'frame generation'],
-    bestFor: 'Smooth motion, slow-motion effects',
-    price: 'Subscription',
-    releaseDate: '2024',
-    category: 'effects'
-  },
-  'pika-2-0': {
-    name: 'Pika 2.0',
-    description: 'Advanced video generation with lip sync and character animation',
-    strengths: ['lip sync', 'character animation', 'style consistency'],
-    bestFor: 'Character animation, dialogue scenes',
-    price: 'Free/Paid tiers',
-    releaseDate: '2025',
-    category: 'animation'
-  },
-  'pika-effects': {
-    name: 'Pika Effects',
-    description: 'Specialized video effects and transitions',
-    strengths: ['visual effects', 'transitions', 'stylization'],
-    bestFor: 'Effect-heavy content, stylized videos',
-    price: 'Credits system',
-    releaseDate: '2024',
-    category: 'effects'
-  },
-  'pika-1-0': {
-    name: 'Pika 1.0',
-    description: 'Original Pika video generation platform',
-    strengths: ['easy to use', 'quick generation', 'social optimized'],
-    bestFor: 'Quick videos, social media content',
-    price: 'Free/Paid',
-    releaseDate: '2024',
-    category: 'social'
-  },
-  'stable-video-diffusion': {
-    name: 'Stable Video Diffusion',
-    description: 'Open-source video generation with fine-tuning',
-    strengths: ['open source', 'custom training', 'local generation'],
-    bestFor: 'Custom models, research, local use',
-    price: 'Free',
-    releaseDate: '2024',
-    category: 'open-source'
-  },
-  'svd-xt': {
-    name: 'SVD-XT',
-    description: 'Extended Stable Video Diffusion with higher quality',
-    strengths: ['4K support', 'longer videos', 'better motion'],
-    bestFor: 'High-quality projects, extended videos',
-    price: 'API access',
-    releaseDate: '2025',
-    category: 'professional'
-  },
-  'svd-frame-interpolation': {
-    name: 'SVD Frame Interpolation',
-    description: 'Frame interpolation for smoother video',
-    strengths: ['smooth motion', 'frame generation', 'upscaling'],
-    bestFor: 'Smooth slow-motion, frame generation',
-    price: 'Free',
-    releaseDate: '2024',
-    category: 'open-source'
-  },
-  'adobe-firefly-video': {
-    name: 'Adobe Firefly Video',
-    description: 'Adobe\'s generative AI for video in Premiere Pro',
-    strengths: ['Adobe integration', 'professional workflow', 'commercial safe'],
-    bestFor: 'Professional editors, post-production',
-    price: 'Creative Cloud',
-    releaseDate: '2025',
-    category: 'professional'
-  },
-  'premiere-pro-ai': {
-    name: 'Premiere Pro AI',
-    description: 'AI-powered editing tools in Premiere Pro',
-    strengths: ['auto-reframe', 'scene detection', 'color matching'],
-    bestFor: 'Post-production, automated editing',
-    price: 'Creative Cloud',
-    releaseDate: '2025',
-    category: 'professional'
-  },
-  'after-effects-ai': {
-    name: 'After Effects AI',
-    description: 'AI-powered motion graphics and effects',
-    strengths: ['motion graphics', 'effects', 'rotoscoping'],
-    bestFor: 'Motion graphics, visual effects',
-    price: 'Creative Cloud',
-    releaseDate: '2025',
-    category: 'effects'
-  },
-  'capcut-pro-ai': {
-    name: 'CapCut Pro AI',
-    description: 'ByteDance\'s AI-powered video editing suite',
-    strengths: ['auto-captions', 'auto-cut', 'templates'],
-    bestFor: 'Social media content, quick edits',
-    price: 'Free/Pro',
-    releaseDate: '2025',
-    category: 'social'
-  },
-  'capcut-text-to-video': {
-    name: 'CapCut Text-to-Video',
-    description: 'AI video generation from text descriptions',
-    strengths: ['quick generation', 'templates', 'music sync'],
-    bestFor: 'Quick content creation, social media',
-    price: 'Free/Pro',
-    releaseDate: '2025',
-    category: 'social'
-  },
-  'capcut-auto-cut': {
-    name: 'CapCut Auto Cut',
-    description: 'AI-powered automatic video editing',
-    strengths: ['auto-editing', 'beat sync', 'highlights'],
-    bestFor: 'Highlight reels, automated edits',
-    price: 'Free/Pro',
-    releaseDate: '2024',
-    category: 'editing'
-  },
-  'invideo-ai': {
-    name: 'InVideo AI',
-    description: 'AI-powered video creation for marketing',
-    strengths: ['script to video', 'stock footage', 'voiceover'],
-    bestFor: 'Marketing videos, promotional content',
-    price: 'Subscription',
-    releaseDate: '2025',
-    category: 'marketing'
-  },
-  'invideo-studio': {
-    name: 'InVideo Studio',
-    description: 'Advanced video editing with AI assistance',
-    strengths: ['AI editing', 'templates', 'collaboration'],
-    bestFor: 'Team projects, collaborative editing',
-    price: 'Subscription',
-    releaseDate: '2024',
-    category: 'collaboration'
-  },
-  'synthesia-2-0': {
-    name: 'Synthesia 2.0',
-    description: 'AI video generation with realistic avatars',
-    strengths: ['avatar videos', 'multilingual', 'custom avatars'],
-    bestFor: 'Corporate training, presentations, e-learning',
-    price: 'Subscription',
-    releaseDate: '2025',
-    category: 'avatar'
-  },
-  'synthesia-avatars': {
-    name: 'Synthesia Avatars',
-    description: 'Custom AI avatar creation and video',
-    strengths: ['custom avatars', 'cloning', 'expressions'],
-    bestFor: 'Personalized videos, branding',
-    price: 'Enterprise',
-    releaseDate: '2024',
-    category: 'avatar'
-  },
-  'heygen-2-0': {
-    name: 'HeyGen 2.0',
-    description: 'AI video generation with avatar and voice cloning',
-    strengths: ['avatar cloning', 'voice cloning', 'translation'],
-    bestFor: 'Personalized videos, multilingual content',
-    price: 'Credits system',
-    releaseDate: '2025',
-    category: 'avatar'
-  },
-  'heygen-interactive': {
-    name: 'HeyGen Interactive',
-    description: 'Interactive AI avatar videos',
-    strengths: ['interactive avatars', 'real-time', 'chat'],
-    bestFor: 'Interactive content, customer service',
-    price: 'Enterprise',
-    releaseDate: '2025',
-    category: 'interactive'
-  },
-  'elevenlabs-video': {
-    name: 'ElevenLabs Video',
-    description: 'AI video with advanced voice synthesis and lip sync',
-    strengths: ['voice quality', 'lip sync', 'emotion'],
-    bestFor: 'Narrated content, voice-first videos',
-    price: 'Subscription',
-    releaseDate: '2025',
-    category: 'voice'
-  },
-  'kling-1-6': {
-    name: 'Kling 1.6',
-    description: 'Advanced video generation from Kuaishou',
-    strengths: ['high quality', 'fast generation', 'Chinese support'],
-    bestFor: 'Chinese market content, high-quality video',
-    price: 'Credits system',
-    releaseDate: '2025',
-    category: 'professional'
-  },
-  'kling-1-5': {
-    name: 'Kling 1.5',
-    description: 'Previous generation with good quality/speed balance',
-    strengths: ['balanced', 'reliable', 'consistent'],
-    bestFor: 'General video creation',
-    price: 'Credits system',
-    releaseDate: '2024',
-    category: 'versatile'
-  },
-  'luma-dream-machine': {
-    name: 'Luma Dream Machine',
-    description: 'High-quality video generation with cinematic quality',
-    strengths: ['cinematic', 'motion quality', 'resolution'],
-    bestFor: 'Cinematic projects, high-end content',
-    price: 'Credits system',
-    releaseDate: '2025',
-    category: 'cinematic'
-  },
-  'luma-ray': {
-    name: 'Luma Ray',
-    description: 'AI-powered 3D video and NeRF technology',
-    strengths: ['3D video', 'NeRF', 'real-world capture'],
-    bestFor: '3D content, real-world capture',
-    price: 'Credits system',
-    releaseDate: '2024',
-    category: '3d'
-  },
-  'haiper-2-0': {
-    name: 'Haiper 2.0',
-    description: 'Video generation with enhanced motion understanding',
-    strengths: ['motion physics', 'object interaction', 'extensions'],
-    bestFor: 'Complex motion scenes, physics-based animation',
-    price: 'Free/Paid',
-    releaseDate: '2025',
-    category: 'motion'
-  },
-  'haiper-1-0': {
-    name: 'Haiper 1.0',
-    description: 'Original Haiper video generation platform',
-    strengths: ['easy to use', 'quick', 'versatile'],
-    bestFor: 'Quick video generation',
-    price: 'Free',
-    releaseDate: '2024',
-    category: 'free'
-  },
-  'minimax-video': {
-    name: 'Minimax Video',
-    description: 'Chinese video generation model with high-quality output',
-    strengths: ['quality', 'speed', 'Chinese optimization'],
-    bestFor: 'Asian market content, high-quality video',
-    price: 'API access',
-    releaseDate: '2025',
-    category: 'professional'
-  },
-  'minimax-hailuo': {
-    name: 'Minimax Hailuo',
-    description: 'Advanced video generation with emotional understanding',
-    strengths: ['emotional', 'expressive', 'character-driven'],
-    bestFor: 'Character-driven content, emotional scenes',
-    price: 'API access',
-    releaseDate: '2025',
-    category: 'expressive'
-  },
-  'kaiber-2-0': {
-    name: 'Kaiber 2.0',
-    description: 'Artistic video generation with style transfer',
-    strengths: ['artistic styles', 'music visualization', 'creative'],
-    bestFor: 'Music videos, artistic content',
-    price: 'Subscription',
-    releaseDate: '2025',
-    category: 'artistic'
-  },
-  'kaiber-motion': {
-    name: 'Kaiber Motion',
-    description: 'Motion-aware artistic video generation',
-    strengths: ['motion control', 'style transfer', 'fluid animation'],
-    bestFor: 'Artistic motion graphics',
-    price: 'Subscription',
-    releaseDate: '2024',
-    category: 'artistic'
-  },
-  'cogvideo-x': {
-    name: 'CogVideoX',
-    description: 'Open-source video generation from THUDM',
-    strengths: ['open source', 'Chinese/English', 'fine-tuning'],
-    bestFor: 'Custom training, research, open-source projects',
-    price: 'Free',
-    releaseDate: '2025',
-    category: 'open-source'
-  },
-  'cogvideo-x-5b': {
-    name: 'CogVideoX-5B',
-    description: '5B parameter version for higher quality',
-    strengths: ['high quality', 'more parameters', 'better results'],
-    bestFor: 'High-quality open-source generation',
-    price: 'Free',
-    releaseDate: '2025',
-    category: 'open-source'
-  },
-  'animatediff': {
-    name: 'AnimateDiff',
-    description: 'Motion module for Stable Diffusion animation',
-    strengths: ['animation', 'motion modules', 'ControlNet support'],
-    bestFor: 'Animated sequences, motion modules',
-    price: 'Free',
-    releaseDate: '2024',
-    category: 'open-source'
-  },
-  'animatediff-v2': {
-    name: 'AnimateDiff V2',
-    description: 'Improved motion module with better quality',
-    strengths: ['better motion', 'quality', 'control'],
-    bestFor: 'High-quality animation',
-    price: 'Free',
-    releaseDate: '2025',
-    category: 'open-source'
-  },
-  'moonvalley': {
-    name: 'Moonvalley',
-    description: 'Free AI video generation with Discord bot',
-    strengths: ['free', 'Discord', 'community'],
-    bestFor: 'Free video generation, community art',
-    price: 'Free',
-    releaseDate: '2024',
-    category: 'free'
-  },
-  'deforum': {
-    name: 'Deforum',
-    description: 'Animation toolkit for Stable Diffusion',
-    strengths: ['animation', 'parameter control', '3D camera'],
-    bestFor: 'Complex animations, camera movements',
-    price: 'Free',
-    releaseDate: '2024',
-    category: 'open-source'
-  },
-  'morph-studio': {
-    name: 'Morph Studio',
-    description: 'AI video generation platform with style control',
-    strengths: ['style control', 'quality', 'easy'],
-    bestFor: 'Style-consistent video generation',
-    price: 'Credits system',
-    releaseDate: '2024',
-    category: 'versatile'
-  },
-  'pixverse': {
-    name: 'Pixverse',
-    description: 'Free AI video generation platform',
-    strengths: ['free', 'web-based', 'fast'],
-    bestFor: 'Free video generation, quick tests',
-    price: 'Free',
-    releaseDate: '2024',
-    category: 'free'
-  },
-  'videocom': {
-    name: 'VideoCom',
-    description: 'AI video generation with character consistency',
-    strengths: ['character consistency', 'storytelling', 'long-form'],
-    bestFor: 'Story-driven videos, character animation',
-    price: 'Credits system',
-    releaseDate: '2024',
-    category: 'storytelling'
-  },
-  'ltx-studio': {
-    name: 'LTX Studio',
-    description: 'AI film production platform',
-    strengths: ['film production', 'scene planning', 'multi-shot'],
-    bestFor: 'Film production, multi-scene videos',
-    price: 'Paid',
-    releaseDate: '2025',
-    category: 'professional'
-  }
+  'google-veo-2': { name: 'Google Veo 2', description: 'Google\'s most advanced video generation model with 4K quality', strengths: ['4K video', 'prompt consistency', 'professional quality'], bestFor: 'Professional video creation, marketing content', price: 'Free (Limited) / Paid', releaseDate: '2025', category: 'professional' },
+  'google-flow': { name: 'Google Flow', description: 'Google\'s real-time video editing AI with intelligent scene analysis', strengths: ['real-time editing', 'scene detection', 'smart transitions'], bestFor: 'Real-time video editing, live content', price: 'Included with Workspace', releaseDate: '2025', category: 'real-time' },
+  'gemini-video': { name: 'Gemini 2.0 Video', description: 'Google Gemini\'s multimodal video understanding and generation', strengths: ['multimodal understanding', 'video analysis', 'script-to-video'], bestFor: 'Content analysis, automated editing', price: 'API pricing', releaseDate: '2025', category: 'analysis' },
+  'video-poet': { name: 'VideoPoet', description: 'Google\'s large language model for video generation', strengths: ['zero-shot', 'video stylization', 'audio generation'], bestFor: 'Experimental video, creative projects', price: 'Research preview', releaseDate: '2024', category: 'experimental' },
+  'openai-sora': { name: 'OpenAI Sora', description: 'State-of-the-art text-to-video with photorealistic quality', strengths: ['photorealistic', 'complex scenes', 'natural motion'], bestFor: 'High-end video production, cinematic projects', price: 'Not publicly available', releaseDate: '2025', category: 'professional' },
+  'chatgpt-4o-video': { name: 'ChatGPT-4o Video', description: 'GPT-4o\'s integrated video understanding and generation', strengths: ['real-time editing', 'multimodal', 'conversational'], bestFor: 'Interactive video editing, content creation', price: 'ChatGPT Plus', releaseDate: '2025', category: 'interactive' },
+  'dalle-video': { name: 'DALL-E Video', description: 'Video generation based on DALL-E\'s prompt understanding', strengths: ['prompt accuracy', 'artistic styles', 'creative control'], bestFor: 'Artistic video creation, experimental', price: 'Credits system', releaseDate: '2025', category: 'artistic' },
+  'meta-movie-gen': { name: 'Meta Movie Gen', description: 'Meta\'s advanced video generation with audio synthesis', strengths: ['audio generation', 'long-form video', 'character consistency'], bestFor: 'Long-form content, character animation', price: 'Research preview', releaseDate: '2025', category: 'long-form' },
+  'make-a-video': { name: 'Make-A-Video', description: 'Meta\'s text-to-video model with motion understanding', strengths: ['motion understanding', 'style transfer', 'quick generation'], bestFor: 'Rapid prototyping, motion experiments', price: 'Research preview', releaseDate: '2024', category: 'rapid' },
+  'emu-video': { name: 'Emu Video', description: 'Meta\'s video generation model based on Emu', strengths: ['quality', 'style control', 'factorized diffusion'], bestFor: 'Factorized video generation, style control', price: 'Research preview', releaseDate: '2024', category: 'experimental' },
+  'runway-gen-3': { name: 'Runway Gen-3', description: 'Latest Runway video generation with advanced controls', strengths: ['multi-shot', 'inpainting', 'professional tools'], bestFor: 'Professional video editing, post-production', price: 'Subscription', releaseDate: '2025', category: 'professional' },
+  'runway-gen-2': { name: 'Runway Gen-2', description: 'Text-to-video and video-to-video generation', strengths: ['style transfer', 'motion brush', 'real-time preview'], bestFor: 'Creative experimentation, style transfer', price: 'Credits system', releaseDate: '2024', category: 'creative' },
+  'runway-frame-interpolation': { name: 'Runway Frame Interpolation', description: 'Smooth slow-motion and frame interpolation', strengths: ['slow motion', 'smooth transitions', 'frame generation'], bestFor: 'Smooth motion, slow-motion effects', price: 'Subscription', releaseDate: '2024', category: 'effects' },
+  'pika-2-0': { name: 'Pika 2.0', description: 'Advanced video generation with lip sync and character animation', strengths: ['lip sync', 'character animation', 'style consistency'], bestFor: 'Character animation, dialogue scenes', price: 'Free/Paid tiers', releaseDate: '2025', category: 'animation' },
+  'pika-effects': { name: 'Pika Effects', description: 'Specialized video effects and transitions', strengths: ['visual effects', 'transitions', 'stylization'], bestFor: 'Effect-heavy content, stylized videos', price: 'Credits system', releaseDate: '2024', category: 'effects' },
+  'pika-1-0': { name: 'Pika 1.0', description: 'Original Pika video generation platform', strengths: ['easy to use', 'quick generation', 'social optimized'], bestFor: 'Quick videos, social media content', price: 'Free/Paid', releaseDate: '2024', category: 'social' },
+  'stable-video-diffusion': { name: 'Stable Video Diffusion', description: 'Open-source video generation with fine-tuning', strengths: ['open source', 'custom training', 'local generation'], bestFor: 'Custom models, research, local use', price: 'Free', releaseDate: '2024', category: 'open-source' },
+  'svd-xt': { name: 'SVD-XT', description: 'Extended Stable Video Diffusion with higher quality', strengths: ['4K support', 'longer videos', 'better motion'], bestFor: 'High-quality projects, extended videos', price: 'API access', releaseDate: '2025', category: 'professional' },
+  'svd-frame-interpolation': { name: 'SVD Frame Interpolation', description: 'Frame interpolation for smoother video', strengths: ['smooth motion', 'frame generation', 'upscaling'], bestFor: 'Smooth slow-motion, frame generation', price: 'Free', releaseDate: '2024', category: 'open-source' },
+  'adobe-firefly-video': { name: 'Adobe Firefly Video', description: 'Adobe\'s generative AI for video in Premiere Pro', strengths: ['Adobe integration', 'professional workflow', 'commercial safe'], bestFor: 'Professional editors, post-production', price: 'Creative Cloud', releaseDate: '2025', category: 'professional' },
+  'premiere-pro-ai': { name: 'Premiere Pro AI', description: 'AI-powered editing tools in Premiere Pro', strengths: ['auto-reframe', 'scene detection', 'color matching'], bestFor: 'Post-production, automated editing', price: 'Creative Cloud', releaseDate: '2025', category: 'professional' },
+  'after-effects-ai': { name: 'After Effects AI', description: 'AI-powered motion graphics and effects', strengths: ['motion graphics', 'effects', 'rotoscoping'], bestFor: 'Motion graphics, visual effects', price: 'Creative Cloud', releaseDate: '2025', category: 'effects' },
+  'capcut-pro-ai': { name: 'CapCut Pro AI', description: 'ByteDance\'s AI-powered video editing suite', strengths: ['auto-captions', 'auto-cut', 'templates'], bestFor: 'Social media content, quick edits', price: 'Free/Pro', releaseDate: '2025', category: 'social' },
+  'capcut-text-to-video': { name: 'CapCut Text-to-Video', description: 'AI video generation from text descriptions', strengths: ['quick generation', 'templates', 'music sync'], bestFor: 'Quick content creation, social media', price: 'Free/Pro', releaseDate: '2025', category: 'social' },
+  'capcut-auto-cut': { name: 'CapCut Auto Cut', description: 'AI-powered automatic video editing', strengths: ['auto-editing', 'beat sync', 'highlights'], bestFor: 'Highlight reels, automated edits', price: 'Free/Pro', releaseDate: '2024', category: 'editing' },
+  'invideo-ai': { name: 'InVideo AI', description: 'AI-powered video creation for marketing', strengths: ['script to video', 'stock footage', 'voiceover'], bestFor: 'Marketing videos, promotional content', price: 'Subscription', releaseDate: '2025', category: 'marketing' },
+  'invideo-studio': { name: 'InVideo Studio', description: 'Advanced video editing with AI assistance', strengths: ['AI editing', 'templates', 'collaboration'], bestFor: 'Team projects, collaborative editing', price: 'Subscription', releaseDate: '2024', category: 'collaboration' },
+  'synthesia-2-0': { name: 'Synthesia 2.0', description: 'AI video generation with realistic avatars', strengths: ['avatar videos', 'multilingual', 'custom avatars'], bestFor: 'Corporate training, presentations, e-learning', price: 'Subscription', releaseDate: '2025', category: 'avatar' },
+  'synthesia-avatars': { name: 'Synthesia Avatars', description: 'Custom AI avatar creation and video', strengths: ['custom avatars', 'cloning', 'expressions'], bestFor: 'Personalized videos, branding', price: 'Enterprise', releaseDate: '2024', category: 'avatar' },
+  'heygen-2-0': { name: 'HeyGen 2.0', description: 'AI video generation with avatar and voice cloning', strengths: ['avatar cloning', 'voice cloning', 'translation'], bestFor: 'Personalized videos, multilingual content', price: 'Credits system', releaseDate: '2025', category: 'avatar' },
+  'heygen-interactive': { name: 'HeyGen Interactive', description: 'Interactive AI avatar videos', strengths: ['interactive avatars', 'real-time', 'chat'], bestFor: 'Interactive content, customer service', price: 'Enterprise', releaseDate: '2025', category: 'interactive' },
+  'elevenlabs-video': { name: 'ElevenLabs Video', description: 'AI video with advanced voice synthesis and lip sync', strengths: ['voice quality', 'lip sync', 'emotion'], bestFor: 'Narrated content, voice-first videos', price: 'Subscription', releaseDate: '2025', category: 'voice' },
+  'kling-1-6': { name: 'Kling 1.6', description: 'Advanced video generation from Kuaishou', strengths: ['high quality', 'fast generation', 'Chinese support'], bestFor: 'Chinese market content, high-quality video', price: 'Credits system', releaseDate: '2025', category: 'professional' },
+  'kling-1-5': { name: 'Kling 1.5', description: 'Previous generation with good quality/speed balance', strengths: ['balanced', 'reliable', 'consistent'], bestFor: 'General video creation', price: 'Credits system', releaseDate: '2024', category: 'versatile' },
+  'luma-dream-machine': { name: 'Luma Dream Machine', description: 'High-quality video generation with cinematic quality', strengths: ['cinematic', 'motion quality', 'resolution'], bestFor: 'Cinematic projects, high-end content', price: 'Credits system', releaseDate: '2025', category: 'cinematic' },
+  'luma-ray': { name: 'Luma Ray', description: 'AI-powered 3D video and NeRF technology', strengths: ['3D video', 'NeRF', 'real-world capture'], bestFor: '3D content, real-world capture', price: 'Credits system', releaseDate: '2024', category: '3d' },
+  'haiper-2-0': { name: 'Haiper 2.0', description: 'Video generation with enhanced motion understanding', strengths: ['motion physics', 'object interaction', 'extensions'], bestFor: 'Complex motion scenes, physics-based animation', price: 'Free/Paid', releaseDate: '2025', category: 'motion' },
+  'haiper-1-0': { name: 'Haiper 1.0', description: 'Original Haiper video generation platform', strengths: ['easy to use', 'quick', 'versatile'], bestFor: 'Quick video generation', price: 'Free', releaseDate: '2024', category: 'free' },
+  'minimax-video': { name: 'Minimax Video', description: 'Chinese video generation model with high-quality output', strengths: ['quality', 'speed', 'Chinese optimization'], bestFor: 'Asian market content, high-quality video', price: 'API access', releaseDate: '2025', category: 'professional' },
+  'minimax-hailuo': { name: 'Minimax Hailuo', description: 'Advanced video generation with emotional understanding', strengths: ['emotional', 'expressive', 'character-driven'], bestFor: 'Character-driven content, emotional scenes', price: 'API access', releaseDate: '2025', category: 'expressive' },
+  'kaiber-2-0': { name: 'Kaiber 2.0', description: 'Artistic video generation with style transfer', strengths: ['artistic styles', 'music visualization', 'creative'], bestFor: 'Music videos, artistic content', price: 'Subscription', releaseDate: '2025', category: 'artistic' },
+  'kaiber-motion': { name: 'Kaiber Motion', description: 'Motion-aware artistic video generation', strengths: ['motion control', 'style transfer', 'fluid animation'], bestFor: 'Artistic motion graphics', price: 'Subscription', releaseDate: '2024', category: 'artistic' },
+  'cogvideo-x': { name: 'CogVideoX', description: 'Open-source video generation from THUDM', strengths: ['open source', 'Chinese/English', 'fine-tuning'], bestFor: 'Custom training, research, open-source projects', price: 'Free', releaseDate: '2025', category: 'open-source' },
+  'cogvideo-x-5b': { name: 'CogVideoX-5B', description: '5B parameter version for higher quality', strengths: ['high quality', 'more parameters', 'better results'], bestFor: 'High-quality open-source generation', price: 'Free', releaseDate: '2025', category: 'open-source' },
+  'animatediff': { name: 'AnimateDiff', description: 'Motion module for Stable Diffusion animation', strengths: ['animation', 'motion modules', 'ControlNet support'], bestFor: 'Animated sequences, motion modules', price: 'Free', releaseDate: '2024', category: 'open-source' },
+  'animatediff-v2': { name: 'AnimateDiff V2', description: 'Improved motion module with better quality', strengths: ['better motion', 'quality', 'control'], bestFor: 'High-quality animation', price: 'Free', releaseDate: '2025', category: 'open-source' },
+  'moonvalley': { name: 'Moonvalley', description: 'Free AI video generation with Discord bot', strengths: ['free', 'Discord', 'community'], bestFor: 'Free video generation, community art', price: 'Free', releaseDate: '2024', category: 'free' },
+  'deforum': { name: 'Deforum', description: 'Animation toolkit for Stable Diffusion', strengths: ['animation', 'parameter control', '3D camera'], bestFor: 'Complex animations, camera movements', price: 'Free', releaseDate: '2024', category: 'open-source' },
+  'morph-studio': { name: 'Morph Studio', description: 'AI video generation platform with style control', strengths: ['style control', 'quality', 'easy'], bestFor: 'Style-consistent video generation', price: 'Credits system', releaseDate: '2024', category: 'versatile' },
+  'pixverse': { name: 'Pixverse', description: 'Free AI video generation platform', strengths: ['free', 'web-based', 'fast'], bestFor: 'Free video generation, quick tests', price: 'Free', releaseDate: '2024', category: 'free' },
+  'videocom': { name: 'VideoCom', description: 'AI video generation with character consistency', strengths: ['character consistency', 'storytelling', 'long-form'], bestFor: 'Story-driven videos, character animation', price: 'Credits system', releaseDate: '2024', category: 'storytelling' },
+  'ltx-studio': { name: 'LTX Studio', description: 'AI film production platform', strengths: ['film production', 'scene planning', 'multi-shot'], bestFor: 'Film production, multi-scene videos', price: 'Paid', releaseDate: '2025', category: 'professional' }
 };
 
-// ========== AI MODEL MANAGER ==========
 class AIModelManager {
   static detectPlatform(promptData) {
     const promptText = (promptData.promptText || '').toLowerCase();
@@ -1841,16 +1591,11 @@ class AIModelManager {
     const keywords = promptData.keywords || [];
     const category = promptData.category || 'general';
     const fileType = promptData.fileType || 'image';
-    
     const isVideo = fileType === 'video' || promptData.videoUrl || category === 'video';
-    
-    if (isVideo) {
-      return this.detectVideoPlatform(promptText, keywords, category);
-    }
-    
+    if (isVideo) return this.detectVideoPlatform(promptText, keywords, category);
     return this.detectPhotoPlatform(promptText, keywords, category);
   }
-  
+
   static detectPhotoPlatform(promptText, keywords, category) {
     if (promptText.includes('imagen') || keywords.includes('imagen')) return 'google-imagen';
     if (promptText.includes('gemini image')) return 'gemini-image';
@@ -1875,7 +1620,6 @@ class AIModelManager {
     if (promptText.includes('deepai')) return 'deepai';
     if (promptText.includes('craiyon')) return 'craiyon-v3';
     if (promptText.includes('bing')) return 'bing-creator';
-    
     const categoryPlatforms = {
       'art': 'midjourney-v6',
       'photography': 'google-imagen',
@@ -1884,10 +1628,9 @@ class AIModelManager {
       'free': 'craiyon-v3',
       'general': 'dalle-3'
     };
-    
     return categoryPlatforms[category] || 'dalle-3';
   }
-  
+
   static detectVideoPlatform(promptText, keywords, category) {
     if (promptText.includes('veo') || keywords.includes('veo')) return 'google-veo-2';
     if (promptText.includes('sora') || keywords.includes('sora')) return 'openai-sora';
@@ -1903,7 +1646,6 @@ class AIModelManager {
     if (promptText.includes('luma dream machine')) return 'luma-dream-machine';
     if (promptText.includes('haiper')) return 'haiper-2-0';
     if (promptText.includes('kaiber')) return 'kaiber-2-0';
-    
     const categoryPlatforms = {
       'professional': 'runway-gen-3',
       'animation': 'pika-2-0',
@@ -1914,41 +1656,21 @@ class AIModelManager {
       'video': 'runway-gen-3',
       'general': 'pika-2-0'
     };
-    
     return categoryPlatforms[category] || 'pika-2-0';
   }
-  
-  static getPhotoModelInfo(modelId) {
-    return AI_PHOTO_MODELS[modelId] || AI_PHOTO_MODELS['dalle-3'];
-  }
-  
-  static getVideoModelInfo(modelId) {
-    return AI_VIDEO_MODELS[modelId] || AI_VIDEO_MODELS['pika-2-0'];
-  }
-  
-  static getAllPhotoModels() {
-    return Object.values(AI_PHOTO_MODELS);
-  }
-  
-  static getAllVideoModels() {
-    return Object.values(AI_VIDEO_MODELS);
-  }
-  
-  static getPhotoModelCount() {
-    return Object.keys(AI_PHOTO_MODELS).length;
-  }
-  
-  static getVideoModelCount() {
-    return Object.keys(AI_VIDEO_MODELS).length;
-  }
+
+  static getPhotoModelInfo(modelId) { return AI_PHOTO_MODELS[modelId] || AI_PHOTO_MODELS['dalle-3']; }
+  static getVideoModelInfo(modelId) { return AI_VIDEO_MODELS[modelId] || AI_VIDEO_MODELS['pika-2-0']; }
+  static getAllPhotoModels() { return Object.values(AI_PHOTO_MODELS); }
+  static getAllVideoModels() { return Object.values(AI_VIDEO_MODELS); }
+  static getPhotoModelCount() { return Object.keys(AI_PHOTO_MODELS).length; }
+  static getVideoModelCount() { return Object.keys(AI_VIDEO_MODELS).length; }
 }
 
-// ========== AI PLATFORM CONTENT GENERATOR ==========
 class AIPlatformContentGenerator {
   static generatePlatformIntroduction(promptData) {
     const isVideo = promptData.fileType === 'video' || promptData.videoUrl || promptData.category === 'video';
     const platformId = AIModelManager.detectPlatform(promptData);
-    
     if (isVideo) {
       const platform = AIModelManager.getVideoModelInfo(platformId);
       return `${platform.name} ${platform.description}. With cutting-edge capabilities including ${platform.strengths.join(', ')}, this AI video tool helps you create professional-quality content with minimal effort.`;
@@ -1957,22 +1679,15 @@ class AIPlatformContentGenerator {
       return `${platform.name} ${platform.description}. Whether you need ${platform.strengths.join(', ')}, this platform delivers exceptional results for your creative projects.`;
     }
   }
-  
+
   static generatePlatformComparison(promptData) {
     const isVideo = promptData.fileType === 'video' || promptData.videoUrl || promptData.category === 'video';
     const primaryPlatformId = AIModelManager.detectPlatform(promptData);
-    
     if (isVideo) {
-      const topVideoPlatforms = [
-        'google-veo-2', 'openai-sora', 'runway-gen-3', 'pika-2-0', 'adobe-firefly-video',
-        'meta-movie-gen', 'capcut-pro-ai', 'synthesia-2-0', 'luma-dream-machine', 'kaiber-2-0',
-        'stable-video-diffusion', 'haiper-2-0', 'minimax-video', 'cogvideo-x', 'elevenlabs-video'
-      ];
-      
+      const topVideoPlatforms = ['google-veo-2', 'openai-sora', 'runway-gen-3', 'pika-2-0', 'adobe-firefly-video', 'meta-movie-gen', 'capcut-pro-ai', 'synthesia-2-0', 'luma-dream-machine', 'kaiber-2-0', 'stable-video-diffusion', 'haiper-2-0', 'minimax-video', 'cogvideo-x', 'elevenlabs-video'];
       const comparisonRows = topVideoPlatforms.map(platformId => {
         const platform = AIModelManager.getVideoModelInfo(platformId);
         const isPrimary = platformId === primaryPlatformId;
-        
         return `
           <tr class="${isPrimary ? 'primary-platform' : ''}">
             <td><strong>${platform.name}</strong>${isPrimary ? ' <span class="primary-badge">Recommended</span>' : ''}</td>
@@ -1983,25 +1698,14 @@ class AIPlatformContentGenerator {
           </tr>
         `;
       }).join('');
-      
       return `
         <div class="platform-comparison">
           <h3><i class="fas fa-video"></i> AI Video Platform Comparison (${AIModelManager.getVideoModelCount()}+ Models)</h3>
           <p>Choose from over ${AIModelManager.getVideoModelCount()} leading AI video platforms. Compare features, pricing, and best use cases:</p>
           <div class="comparison-table-container">
             <table class="platform-comparison-table">
-              <thead>
-                <tr>
-                  <th>Platform</th>
-                  <th>Best For</th>
-                  <th>Pricing</th>
-                  <th>Category</th>
-                  <th>Key Strength</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${comparisonRows}
-              </tbody>
+              <thead><tr><th>Platform</th><th>Best For</th><th>Pricing</th><th>Category</th><th>Key Strength</th></tr></thead>
+              <tbody>${comparisonRows}</tbody>
             </table>
           </div>
           <div class="comparison-tips">
@@ -2017,16 +1721,10 @@ class AIPlatformContentGenerator {
         </div>
       `;
     } else {
-      const topPhotoPlatforms = [
-        'google-imagen', 'dalle-3', 'midjourney-v6', 'stable-diffusion-3', 'adobe-firefly-image',
-        'leonardo-creative', 'ideogram-2', 'canva-ai', 'playground-v2', 'runway-image',
-        'nightcafe-creator', 'wombo-dream', 'getty-generative', 'craiyon-v3', 'bing-creator'
-      ];
-      
+      const topPhotoPlatforms = ['google-imagen', 'dalle-3', 'midjourney-v6', 'stable-diffusion-3', 'adobe-firefly-image', 'leonardo-creative', 'ideogram-2', 'canva-ai', 'playground-v2', 'runway-image', 'nightcafe-creator', 'wombo-dream', 'getty-generative', 'craiyon-v3', 'bing-creator'];
       const comparisonRows = topPhotoPlatforms.map(platformId => {
         const platform = AIModelManager.getPhotoModelInfo(platformId);
         const isPrimary = platformId === primaryPlatformId;
-        
         return `
           <tr class="${isPrimary ? 'primary-platform' : ''}">
             <td><strong>${platform.name}</strong>${isPrimary ? ' <span class="primary-badge">Recommended</span>' : ''}</td>
@@ -2037,25 +1735,14 @@ class AIPlatformContentGenerator {
           </tr>
         `;
       }).join('');
-      
       return `
         <div class="platform-comparison">
           <h3><i class="fas fa-camera"></i> AI Photo Platform Comparison (${AIModelManager.getPhotoModelCount()}+ Models)</h3>
           <p>Choose from over ${AIModelManager.getPhotoModelCount()} leading AI image platforms. Compare features, pricing, and best use cases:</p>
           <div class="comparison-table-container">
             <table class="platform-comparison-table">
-              <thead>
-                <tr>
-                  <th>Platform</th>
-                  <th>Best For</th>
-                  <th>Pricing</th>
-                  <th>Category</th>
-                  <th>Key Strength</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${comparisonRows}
-              </tbody>
+              <thead><tr><th>Platform</th><th>Best For</th><th>Pricing</th><th>Category</th><th>Key Strength</th></tr></thead>
+              <tbody>${comparisonRows}</tbody>
             </table>
           </div>
           <div class="comparison-tips">
@@ -2073,54 +1760,27 @@ class AIPlatformContentGenerator {
       `;
     }
   }
-  
+
   static generateBestAITools(promptData) {
     const isVideo = promptData.fileType === 'video' || promptData.videoUrl || promptData.category === 'video';
     const primaryPlatformId = AIModelManager.detectPlatform(promptData);
-    
     if (isVideo) {
-      const featuredPlatforms = [
-        'google-veo-2', 'openai-sora', 'runway-gen-3', 'pika-2-0', 'adobe-firefly-video',
-        'capcut-pro-ai', 'synthesia-2-0', 'luma-dream-machine', 'kaiber-2-0', 'stable-video-diffusion'
-      ];
-      
+      const featuredPlatforms = ['google-veo-2', 'openai-sora', 'runway-gen-3', 'pika-2-0', 'adobe-firefly-video', 'capcut-pro-ai', 'synthesia-2-0', 'luma-dream-machine', 'kaiber-2-0', 'stable-video-diffusion'];
       return featuredPlatforms.slice(0, 6).map(platformId => {
         const platform = AIModelManager.getVideoModelInfo(platformId);
-        return {
-          name: platform.name,
-          description: platform.description,
-          strengths: platform.strengths,
-          bestFor: platform.bestFor,
-          price: platform.price,
-          category: platform.category,
-          isPrimary: platformId === primaryPlatformId
-        };
+        return { name: platform.name, description: platform.description, strengths: platform.strengths, bestFor: platform.bestFor, price: platform.price, category: platform.category, isPrimary: platformId === primaryPlatformId };
       });
     } else {
-      const featuredPlatforms = [
-        'google-imagen', 'dalle-3', 'midjourney-v6', 'stable-diffusion-3', 'adobe-firefly-image',
-        'leonardo-creative', 'ideogram-2', 'canva-ai', 'playground-v2', 'getty-generative'
-      ];
-      
+      const featuredPlatforms = ['google-imagen', 'dalle-3', 'midjourney-v6', 'stable-diffusion-3', 'adobe-firefly-image', 'leonardo-creative', 'ideogram-2', 'canva-ai', 'playground-v2', 'getty-generative'];
       return featuredPlatforms.slice(0, 6).map(platformId => {
         const platform = AIModelManager.getPhotoModelInfo(platformId);
-        return {
-          name: platform.name,
-          description: platform.description,
-          strengths: platform.strengths,
-          bestFor: platform.bestFor,
-          price: platform.price,
-          category: platform.category,
-          rating: platform.category === 'professional' ? 5 : 4,
-          isPrimary: platformId === primaryPlatformId
-        };
+        return { name: platform.name, description: platform.description, strengths: platform.strengths, bestFor: platform.bestFor, price: platform.price, category: platform.category, rating: platform.category === 'professional' ? 5 : 4, isPrimary: platformId === primaryPlatformId };
       });
     }
   }
-  
+
   static generateExpertTips(promptData) {
     const isVideo = promptData.fileType === 'video' || promptData.videoUrl || promptData.category === 'video';
-    
     if (isVideo) {
       return [
         'Start with detailed scene descriptions including camera angles, lighting, and mood',
@@ -2149,10 +1809,9 @@ class AIPlatformContentGenerator {
       ];
     }
   }
-  
+
   static generateUsageTips(promptData) {
     const isVideo = promptData.fileType === 'video' || promptData.videoUrl || promptData.category === 'video';
-    
     if (isVideo) {
       return [
         'Keep videos short (3-10 seconds) for optimal social media performance',
@@ -2181,14 +1840,12 @@ class AIPlatformContentGenerator {
       ];
     }
   }
-  
+
   static generateStepByStepGuide(promptData) {
     const isVideo = promptData.fileType === 'video' || promptData.videoUrl || promptData.category === 'video';
     const platformId = AIModelManager.detectPlatform(promptData);
-    
     if (isVideo) {
       const platform = AIModelManager.getVideoModelInfo(platformId);
-      
       return {
         access: `Access ${platform.name} through ${this.getVideoAccessMethod(platformId)}. Create an account if needed and familiarize yourself with the interface.`,
         preparation: 'Define your video concept including duration, style, mood, and key scenes. Write a detailed description of what you want to create.',
@@ -2199,7 +1856,6 @@ class AIPlatformContentGenerator {
       };
     } else {
       const platform = AIModelManager.getPhotoModelInfo(platformId);
-      
       return {
         access: `Access ${platform.name} through ${this.getPhotoAccessMethod(platformId)}.`,
         preparation: 'Start with a clear concept. Consider the style, composition, and mood you want to achieve.',
@@ -2210,7 +1866,33 @@ class AIPlatformContentGenerator {
       };
     }
   }
-  
+
+  static getPhotoParameterTips(platformId) {
+    const tips = {
+      'midjourney-v6': 'Use --ar for aspect ratios, --style for artistic approaches, --chaos for variation, --stylize for artistic interpretation',
+      'dalle-3': 'Use natural language, specify style and quality, include artistic references',
+      'stable-diffusion-3': 'Adjust CFG scale (7-12), steps (20-50), use negative prompts, try different samplers',
+      'google-imagen': 'Use detailed descriptions, include lighting and composition terms',
+      'adobe-firefly-image': 'Use content type filters, style presets, commercial-safe prompts',
+      'leonardo-creative': 'Adjust guidance scale, use element weights, select appropriate model',
+      'default': 'Adjust quality settings, aspect ratio, and style parameters based on your needs'
+    };
+    return tips[platformId] || tips.default;
+  }
+
+  static getVideoParameterTips(platformId) {
+    const tips = {
+      'google-veo-2': 'Adjust resolution, duration, and aspect ratio. Use negative prompts to avoid unwanted elements.',
+      'openai-sora': 'Specify camera angles, lighting, and motion style. Use detailed scene descriptions.',
+      'runway-gen-3': 'Use motion brush for specific movements, adjust frame consistency for smoother results.',
+      'pika-2-0': 'Use -neg for negative prompts, -ar for aspect ratio, -seed for consistency, -motion for intensity.',
+      'adobe-firefly-video': 'Use generative extend for longer videos, apply style presets for consistent look.',
+      'capcut-pro-ai': 'Use auto-captions, smart cut, and AI effects. Adjust speed and transitions.',
+      'default': 'Adjust quality settings, duration, and style parameters based on your needs.'
+    };
+    return tips[platformId] || tips.default;
+  }
+
   static getPhotoAccessMethod(platformId) {
     const methods = {
       'google-imagen': 'Google AI Studio or Vertex AI platform',
@@ -2246,10 +1928,9 @@ class AIPlatformContentGenerator {
       'tensorart': 'tensor.art platform',
       'seaart': 'seaart.ai platform'
     };
-    
     return methods[platformId] || 'the platform\'s official website or app';
   }
-  
+
   static getVideoAccessMethod(platformId) {
     const methods = {
       'google-veo-2': 'Google AI Studio or Vertex AI platform',
@@ -2305,38 +1986,9 @@ class AIPlatformContentGenerator {
       'videocom': 'videocom.ai',
       'ltx-studio': 'ltx.studio'
     };
-    
     return methods[platformId] || 'the platform\'s official website or app';
   }
-  
-  static getPhotoParameterTips(platformId) {
-    const tips = {
-      'midjourney-v6': 'Use --ar for aspect ratios, --style for artistic approaches, --chaos for variation, --stylize for artistic interpretation',
-      'dalle-3': 'Use natural language, specify style and quality, include artistic references',
-      'stable-diffusion-3': 'Adjust CFG scale (7-12), steps (20-50), use negative prompts, try different samplers',
-      'google-imagen': 'Use detailed descriptions, include lighting and composition terms',
-      'adobe-firefly-image': 'Use content type filters, style presets, commercial-safe prompts',
-      'leonardo-creative': 'Adjust guidance scale, use element weights, select appropriate model',
-      'default': 'Adjust quality settings, aspect ratio, and style parameters based on your needs'
-    };
-    
-    return tips[platformId] || tips.default;
-  }
-  
-  static getVideoParameterTips(platformId) {
-    const tips = {
-      'google-veo-2': 'Adjust resolution, duration, and aspect ratio. Use negative prompts to avoid unwanted elements.',
-      'openai-sora': 'Specify camera angles, lighting, and motion style. Use detailed scene descriptions.',
-      'runway-gen-3': 'Use motion brush for specific movements, adjust frame consistency for smoother results.',
-      'pika-2-0': 'Use -neg for negative prompts, -ar for aspect ratio, -seed for consistency, -motion for intensity.',
-      'adobe-firefly-video': 'Use generative extend for longer videos, apply style presets for consistent look.',
-      'capcut-pro-ai': 'Use auto-captions, smart cut, and AI effects. Adjust speed and transitions.',
-      'default': 'Adjust quality settings, duration, and style parameters based on your needs.'
-    };
-    
-    return tips[platformId] || tips.default;
-  }
-  
+
   static generateModelSpecificTips() {
     return `
     <div class="model-specific-tips">
@@ -2402,17 +2054,12 @@ class AIPlatformContentGenerator {
   }
 }
 
-// AI Content Generator for Prompt Pages
 class PromptContentGenerator {
   static generateDetailedExplanation(promptData) {
     const keywords = promptData.keywords || ['AI', 'prompt'];
     const category = promptData.category || 'general';
     const isVideo = promptData.fileType === 'video' || promptData.videoUrl || category === 'video';
-    
-    if (isVideo) {
-      return AIPlatformContentGenerator.generatePlatformIntroduction(promptData);
-    }
-    
+    if (isVideo) return AIPlatformContentGenerator.generatePlatformIntroduction(promptData);
     const explanations = {
       'art': `This ${keywords[0] || 'creative'} prompt generates stunning visual artwork through AI image generation. The prompt carefully combines specific stylistic elements, composition techniques, and artistic references to produce unique digital creations that showcase the power of modern AI art tools.`,
       'photography': `This photography-style prompt creates realistic images that mimic professional photographic techniques. The AI interprets lighting conditions, camera settings, and compositional rules to generate images that appear to be captured with high-end photographic equipment and expert technique.`,
@@ -2420,14 +2067,12 @@ class PromptContentGenerator {
       'writing': `This writing prompt generates textual content using advanced language models. The AI analyzes the prompt structure, tone requirements, and content specifications to produce coherent, engaging written material that meets specific creative or professional needs.`,
       'general': `This AI prompt leverages advanced machine learning algorithms to interpret and execute creative instructions. The system analyzes the prompt's semantic structure, contextual cues, and stylistic requirements to generate high-quality output that aligns with the specified parameters.`
     };
-
     return explanations[category] || explanations.general;
   }
 
   static generateStepByStepInstructions(promptData) {
     const category = promptData.category || 'general';
     const isVideo = promptData.fileType === 'video' || promptData.videoUrl || category === 'video';
-    
     if (isVideo) {
       const steps = AIPlatformContentGenerator.generateStepByStepGuide(promptData);
       return [
@@ -2439,7 +2084,6 @@ class PromptContentGenerator {
         `Step 6: ${steps.finalization}`
       ];
     }
-    
     const steps = {
       'art': [
         "Copy the exact prompt text provided below",
@@ -2477,23 +2121,18 @@ class PromptContentGenerator {
         "Iterate with modifications if necessary"
       ]
     };
-
     return steps[category] || steps.general;
   }
 
-  static generateBestAITools(promptData) {
-    return AIPlatformContentGenerator.generateBestAITools(promptData);
-  }
+  static generateBestAITools(promptData) { return AIPlatformContentGenerator.generateBestAITools(promptData); }
 
   static generateTrendAnalysis(promptData) {
     const keywords = promptData.keywords || [];
     const category = promptData.category || 'general';
     const isVideo = promptData.fileType === 'video' || promptData.videoUrl || category === 'video';
-    
     if (isVideo) {
       return `AI video generation is exploding in popularity with short-form content dominating social media. Trends show increased demand for ${keywords[0] || 'dynamic'} video reels, seamless transitions, and cinematic motion sequences. AI tools are now capable of creating professional-grade video content from simple text prompts, revolutionizing content creation for platforms like TikTok, Instagram Reels, and YouTube Shorts. The latest models like Google Veo 2 and OpenAI Sora are pushing the boundaries of what's possible with AI-generated video.`;
     }
-    
     const trends = {
       'art': `The AI art landscape is rapidly evolving with trends leaning towards ${keywords.slice(0, 2).join(' and ') || 'mixed-media styles'}. Current movements emphasize hybrid techniques, surreal compositions, and the integration of traditional art principles with digital innovation. Prompt engineering has become crucial for achieving specific artistic visions.`,
       'photography': `AI photography is revolutionizing how we create visual content. Trends show increased demand for ${keywords[0] || 'professional'} styles that mimic real-world photography while offering impossible perspectives and lighting conditions. The focus is on achieving photographic realism with creative freedom beyond physical constraints.`,
@@ -2501,13 +2140,10 @@ class PromptContentGenerator {
       'writing': `AI writing trends emphasize ${keywords[0] || 'engaging'} content that maintains human-like quality while optimizing for specific audiences. The focus is on creating coherent, context-aware text that serves practical purposes across different domains and use cases.`,
       'general': `The AI prompt engineering field is experiencing rapid growth with trends focusing on more specific, detailed instructions that yield predictable, high-quality results. There's increasing emphasis on understanding how different AI models interpret various prompt structures and stylistic elements.`
     };
-
     return trends[category] || trends.general;
   }
 
-  static generateUsageTips(promptData) {
-    return AIPlatformContentGenerator.generateUsageTips(promptData);
-  }
+  static generateUsageTips(promptData) { return AIPlatformContentGenerator.generateUsageTips(promptData); }
 
   static generateSEOTips(promptData) {
     return [
@@ -2520,15 +2156,9 @@ class PromptContentGenerator {
   }
 }
 
-// ENHANCED AI Description Generator
 class AIDescriptionGenerator {
-  static generatePlatformIntroduction(promptData) {
-    return AIPlatformContentGenerator.generatePlatformIntroduction(promptData);
-  }
-
-  static detectPlatform(promptData) {
-    return AIModelManager.detectPlatform(promptData);
-  }
+  static generatePlatformIntroduction(promptData) { return AIPlatformContentGenerator.generatePlatformIntroduction(promptData); }
+  static detectPlatform(promptData) { return AIModelManager.detectPlatform(promptData); }
 
   static getCategoryBenefits(category) {
     const benefits = {
@@ -2539,7 +2169,6 @@ class AIDescriptionGenerator {
       'video': 'viral-worthy video reels, dynamic motion graphics, or cinematic sequences',
       'general': 'high-quality outputs, creative solutions, or professional results'
     };
-    
     return benefits[category] || benefits.general;
   }
 
@@ -2552,7 +2181,6 @@ class AIDescriptionGenerator {
       'video': 'motion, pacing, transitions, camera movements, and duration',
       'general': 'every aspect of your creative vision with precision'
     };
-    
     return aspects[category] || aspects.general;
   }
 
@@ -2560,7 +2188,6 @@ class AIDescriptionGenerator {
     const category = promptData.category || 'general';
     const isVideo = promptData.fileType === 'video' || promptData.videoUrl || category === 'video';
     const platformId = this.detectPlatform(promptData);
-    
     if (isVideo) {
       const platform = AIModelManager.getVideoModelInfo(platformId);
       return `This video creation prompt is tailored for content creators, social media managers, videographers, and digital marketers who want to leverage ${platform.name}'s ${platform.strengths[0] || 'advanced'} capabilities to create stunning video content efficiently.`;
@@ -2569,7 +2196,7 @@ class AIDescriptionGenerator {
       return `This curated collection of prompts is tailored for ${this.getAudienceForCategory(category)} who want to leverage ${platform.name}'s ${platform.strengths[0] || 'powerful'} capabilities.`;
     }
   }
-  
+
   static getAudienceForCategory(category) {
     const audiences = {
       'art': 'artists, designers, and creative professionals',
@@ -2579,7 +2206,6 @@ class AIDescriptionGenerator {
       'video': 'content creators, social media managers, and videographers',
       'general': 'creators, professionals, and AI enthusiasts'
     };
-    
     return audiences[category] || audiences.general;
   }
 
@@ -2588,11 +2214,7 @@ class AIDescriptionGenerator {
     const keywords = promptData.keywords || [];
     const trendingTerms = keywords.slice(0, 3).join(', ');
     const isVideo = promptData.fileType === 'video' || promptData.videoUrl || category === 'video';
-    
-    if (isVideo) {
-      return `These video prompts leverage the latest short-form content trends like ${trendingTerms || 'dynamic transitions and viral effects'}, optimized for platforms like TikTok, Instagram Reels, and YouTube Shorts.`;
-    }
-    
+    if (isVideo) return `These video prompts leverage the latest short-form content trends like ${trendingTerms || 'dynamic transitions and viral effects'}, optimized for platforms like TikTok, Instagram Reels, and YouTube Shorts.`;
     const trends = {
       'art': `Each prompt combines trending aesthetics like ${trendingTerms || 'contemporary digital art styles'}, from innovative artistic movements to classic techniques reimagined for the digital age.`,
       'photography': `Every prompt incorporates current visual trends including ${trendingTerms || 'modern photographic techniques'}, blending professional photography principles with AI-enhanced creativity.`,
@@ -2600,52 +2222,34 @@ class AIDescriptionGenerator {
       'writing': `Each writing prompt leverages contemporary styles including ${trendingTerms || 'modern communication techniques'}, merging engaging storytelling with practical content creation.`,
       'general': `Every prompt features cutting-edge approaches like ${trendingTerms || 'advanced AI techniques'}, making it easy to consistently produce high-quality, trend-aware content.`
     };
-    
     return trends[category] || trends.general;
   }
 
   static generatePlatformCapabilities(promptData) {
     const isVideo = promptData.fileType === 'video' || promptData.videoUrl || promptData.category === 'video';
     const platformId = this.detectPlatform(promptData);
-    
     if (isVideo) {
       const platform = AIModelManager.getVideoModelInfo(platformId);
-      return `${platform.name}'s ${platform.category} capabilities deliver ${platform.strengths.join(', ')} for professional-quality video content.`;
+      return `${platform.name}'s ${platform.category} capabilities deliver ${platform.strengths.join(', ') || 'high-quality'} video content.`;
     } else {
       const platform = AIModelManager.getPhotoModelInfo(platformId);
-      return `${platform.name}'s ${platform.category} engine creates ${platform.strengths.join(', ')} outputs with exceptional quality and consistency.`;
+      return `${platform.name}'s ${platform.category} engine creates ${platform.strengths.join(', ') || 'professional'} outputs with exceptional quality and consistency.`;
     }
   }
 
-  static generatePlatformComparison(promptData) {
-    return AIPlatformContentGenerator.generatePlatformComparison(promptData);
-  }
-
-  static generateBestAITools(promptData) {
-    return AIPlatformContentGenerator.generateBestAITools(promptData);
-  }
-
-  static generateModelSpecificTips() {
-    return AIPlatformContentGenerator.generateModelSpecificTips();
-  }
-
-  static generateStepByStepGuide(promptData) {
-    return AIPlatformContentGenerator.generateStepByStepGuide(promptData);
-  }
-
-  static generateExpertTips(promptData) {
-    return AIPlatformContentGenerator.generateExpertTips(promptData);
-  }
+  static generatePlatformComparison(promptData) { return AIPlatformContentGenerator.generatePlatformComparison(promptData); }
+  static generateBestAITools(promptData) { return AIPlatformContentGenerator.generateBestAITools(promptData); }
+  static generateModelSpecificTips() { return AIPlatformContentGenerator.generateModelSpecificTips(); }
+  static generateStepByStepGuide(promptData) { return AIPlatformContentGenerator.generateStepByStepGuide(promptData); }
+  static generateExpertTips(promptData) { return AIPlatformContentGenerator.generateExpertTips(promptData); }
 
   static generateComprehensiveDescription(promptData) {
     const platformIntro = this.generatePlatformIntroduction(promptData);
     const targetAudience = this.generateTargetAudience(promptData);
     const trendContext = this.generateTrendContext(promptData);
     const capabilities = this.generatePlatformCapabilities(promptData);
-    
     const steps = this.generateStepByStepGuide(promptData);
     const expertTips = this.generateExpertTips(promptData);
-    
     return {
       introduction: `${platformIntro} ${targetAudience} ${trendContext} ${capabilities}`,
       stepByStep: steps,
@@ -2654,10 +2258,8 @@ class AIDescriptionGenerator {
   }
 }
 
-// Enhanced Engagement Analytics Class - Mock only, no Firestore
 class EngagementAnalytics {
   static async getPromptEngagement(promptId, db) {
-    // Return mock data without any Firestore operations
     return {
       likes: Math.floor(Math.random() * 100),
       views: Math.floor(Math.random() * 500),
@@ -2670,26 +2272,17 @@ class EngagementAnalytics {
   }
 }
 
-// News-specific SEO Optimizer
 class NewsSEOOptimizer {
-  static generateNewsTitle(title) {
-    return `${title || 'AI News'} - tools prompt News`;
-  }
-
+  static generateNewsTitle(title) { return `${title || 'AI News'} - tools prompt News`; }
   static generateNewsDescription(content) {
     if (!content) return 'Latest AI news and updates from tools prompt.';
     const cleanContent = content.replace(/[^\w\s]/gi, ' ').substring(0, 150);
     return `${cleanContent}... Read more AI prompt news and updates.`;
   }
-
   static generateNewsSlug(title) {
-    const baseSlug = (title || 'ai-news').toLowerCase()
-      .replace(/[^\w\s]/g, '')
-      .replace(/\s+/g, '-')
-      .substring(0, 60);
+    const baseSlug = (title || 'ai-news').toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, '-').substring(0, 60);
     return baseSlug + '-' + Date.now();
   }
-
   static generateNewsStructuredData(news) {
     return {
       "@context": "https://schema.org",
@@ -2699,68 +2292,40 @@ class NewsSEOOptimizer {
       "image": news.imageUrl || 'https://www.toolsprompt.com/logo.png',
       "datePublished": news.createdAt || new Date().toISOString(),
       "dateModified": news.updatedAt || new Date().toISOString(),
-      "author": {
-        "@type": "Person",
-        "name": news.author || "tools prompt Editor"
-      },
+      "author": { "@type": "Person", "name": news.author || "tools prompt Editor" },
       "publisher": {
         "@type": "Organization",
         "name": "tools prompt",
-        "logo": {
-          "@type": "ImageObject",
-          "url": "https://www.toolsprompt.com/logo.png"
-        }
+        "logo": { "@type": "ImageObject", "url": "https://www.toolsprompt.com/logo.png" }
       },
-      "mainEntityOfPage": {
-        "@type": "WebPage",
-        "@id": `https://www.toolsprompt.com/news/${news.id || 'unknown'}`
-      }
+      "mainEntityOfPage": { "@type": "WebPage", "@id": `https://www.toolsprompt.com/news/${news.id || 'unknown'}` }
     };
   }
 }
 
-// Sitemap Generator Class
 class SitemapGenerator {
   static generateSitemap(urls) {
     let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
     xml += `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n`;
-    
     urls.forEach(url => {
-      xml += `<url>\n`;
-      xml += `  <loc>${this.escapeXml(url.loc)}</loc>\n`;
+      xml += `<url>\n  <loc>${this.escapeXml(url.loc)}</loc>\n`;
       if (url.lastmod) xml += `  <lastmod>${url.lastmod}</lastmod>\n`;
       if (url.changefreq) xml += `  <changefreq>${url.changefreq}</changefreq>\n`;
       if (url.priority) xml += `  <priority>${url.priority}</priority>\n`;
       xml += `</url>\n`;
     });
-    
     xml += `</urlset>`;
     return xml;
   }
-
   static generateNewsSitemap(newsUrls) {
     let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
-    xml += `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"\n`;
-    xml += `        xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">\n`;
-    
+    xml += `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"\n        xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">\n`;
     newsUrls.forEach(url => {
-      xml += `<url>\n`;
-      xml += `  <loc>${this.escapeXml(url.loc)}</loc>\n`;
-      xml += `  <news:news>\n`;
-      xml += `    <news:publication>\n`;
-      xml += `      <news:name>tools prompt</news:name>\n`;
-      xml += `      <news:language>en</news:language>\n`;
-      xml += `    </news:publication>\n`;
-      xml += `    <news:publication_date>${new Date(url.lastmod).toISOString().split('T')[0]}</news:publication_date>\n`;
-      xml += `    <news:title>${this.escapeXml(url.title || 'AI News')}</news:title>\n`;
-      xml += `  </news:news>\n`;
-      xml += `</url>\n`;
+      xml += `<url>\n  <loc>${this.escapeXml(url.loc)}</loc>\n  <news:news>\n    <news:publication>\n      <news:name>tools prompt</news:name>\n      <news:language>en</news:language>\n    </news:publication>\n    <news:publication_date>${new Date(url.lastmod).toISOString().split('T')[0]}</news:publication_date>\n    <news:title>${this.escapeXml(url.title || 'AI News')}</news:title>\n  </news:news>\n</url>\n`;
     });
-    
     xml += `</urlset>`;
     return xml;
   }
-
   static escapeXml(unsafe) {
     if (!unsafe) return '';
     return unsafe.replace(/[<>&'"]/g, (c) => {
@@ -2776,126 +2341,20 @@ class SitemapGenerator {
   }
 }
 
-// Mock data for development
 const mockPrompts = [
-  {
-    id: 'demo-1',
-    title: 'Fantasy Landscape with Mountains',
-    promptText: 'Create a fantasy landscape with majestic mountains, floating islands, and a mystical waterfall, digital art, highly detailed, epic composition',
-    imageUrl: 'https://via.placeholder.com/800x400/4e54c8/white?text=Fantasy+Landscape',
-    userName: 'Demo User',
-    userId: 'anonymous',
-    likes: 42,
-    views: 156,
-    uses: 23,
-    copies: 12,
-    commentCount: 5,
-    keywords: ['fantasy', 'landscape', 'mountains', 'digital art'],
-    category: 'art',
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    seoScore: 85,
-    adsenseMigrated: true,
-    fileType: 'image',
-    price: 0,
-    isPaid: false,
-    salesCount: 0,
-    totalEarnings: 0,
-    purchasedBy: []
-  },
-  {
-    id: 'demo-2',
-    title: 'Cyberpunk City Street',
-    promptText: 'Cyberpunk city street at night, neon signs, rainy pavement, futuristic vehicles, Blade Runner style, cinematic lighting',
-    imageUrl: 'https://via.placeholder.com/800x400/8f94fb/white?text=Cyberpunk+City',
-    userName: 'Demo User',
-    userId: 'anonymous',
-    likes: 67,
-    views: 289,
-    uses: 45,
-    copies: 28,
-    commentCount: 8,
-    keywords: ['cyberpunk', 'city', 'neon', 'futuristic'],
-    category: 'art',
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    seoScore: 92,
-    adsenseMigrated: true,
-    fileType: 'image',
-    price: 50,
-    isPaid: true,
-    salesCount: 3,
-    totalEarnings: 150,
-    purchasedBy: []
-  },
-  {
-    id: 'demo-3',
-    title: 'Professional Portrait Photography',
-    promptText: 'Professional portrait photography, natural lighting, soft shadows, high detail, 85mm lens, studio quality, professional model',
-    imageUrl: 'https://via.placeholder.com/800x400/20bf6b/white?text=Portrait+Photo',
-    userName: 'Demo User',
-    userId: 'anonymous',
-    likes: 34,
-    views: 189,
-    uses: 12,
-    copies: 8,
-    commentCount: 3,
-    keywords: ['photography', 'portrait', 'professional', 'studio'],
-    category: 'photography',
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    seoScore: 78,
-    adsenseMigrated: true,
-    fileType: 'image',
-    price: 30,
-    isPaid: true,
-    salesCount: 1,
-    totalEarnings: 30,
-    purchasedBy: []
-  },
-  {
-    id: 'demo-video-1',
-    title: 'Cinematic Drone Shot Over Mountains',
-    promptText: 'Cinematic drone shot flying over majestic mountains at sunrise, golden light, clouds below, smooth motion, 4k quality, epic scale, 10-second video',
-    imageUrl: 'https://via.placeholder.com/300x400/ff6b6b/white?text=Video+Reel',
-    thumbnailUrl: 'https://via.placeholder.com/300x400/ff6b6b/white?text=Custom+Thumbnail',
-    videoUrl: 'https://storage.googleapis.com/mock-bucket/videos/sample-drone.mp4',
-    mediaUrl: 'https://storage.googleapis.com/mock-bucket/videos/sample-drone.mp4',
-    userName: 'Demo Video Creator',
-    userId: 'anonymous',
-    likes: 89,
-    views: 567,
-    uses: 34,
-    copies: 21,
-    commentCount: 12,
-    keywords: ['drone', 'cinematic', 'mountains', 'sunrise', 'video'],
-    category: 'video',
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    seoScore: 95,
-    adsenseMigrated: true,
-    fileType: 'video',
-    videoDuration: 10,
-    videoFormat: 'mp4',
-    hasCustomThumbnail: true,
-    price: 0,
-    isPaid: false,
-    salesCount: 0,
-    totalEarnings: 0,
-    purchasedBy: []
-  }
+  { id: 'demo-1', title: 'Fantasy Landscape with Mountains', promptText: 'Create a fantasy landscape with majestic mountains, floating islands, and a mystical waterfall, digital art, highly detailed, epic composition', imageUrl: 'https://via.placeholder.com/800x400/4e54c8/white?text=Fantasy+Landscape', userName: 'Demo User', userId: 'anonymous', likes: 42, views: 156, uses: 23, copies: 12, commentCount: 5, keywords: ['fantasy', 'landscape', 'mountains', 'digital art'], category: 'art', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), seoScore: 85, adsenseMigrated: true, fileType: 'image', price: 0, isPaid: false, salesCount: 0, totalEarnings: 0, purchasedBy: [] },
+  { id: 'demo-2', title: 'Cyberpunk City Street', promptText: 'Cyberpunk city street at night, neon signs, rainy pavement, futuristic vehicles, Blade Runner style, cinematic lighting', imageUrl: 'https://via.placeholder.com/800x400/8f94fb/white?text=Cyberpunk+City', userName: 'Demo User', userId: 'anonymous', likes: 67, views: 289, uses: 45, copies: 28, commentCount: 8, keywords: ['cyberpunk', 'city', 'neon', 'futuristic'], category: 'art', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), seoScore: 92, adsenseMigrated: true, fileType: 'image', price: 50, isPaid: true, salesCount: 3, totalEarnings: 150, purchasedBy: [] },
+  { id: 'demo-3', title: 'Professional Portrait Photography', promptText: 'Professional portrait photography, natural lighting, soft shadows, high detail, 85mm lens, studio quality, professional model', imageUrl: 'https://via.placeholder.com/800x400/20bf6b/white?text=Portrait+Photo', userName: 'Demo User', userId: 'anonymous', likes: 34, views: 189, uses: 12, copies: 8, commentCount: 3, keywords: ['photography', 'portrait', 'professional', 'studio'], category: 'photography', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), seoScore: 78, adsenseMigrated: true, fileType: 'image', price: 30, isPaid: true, salesCount: 1, totalEarnings: 30, purchasedBy: [] },
+  { id: 'demo-video-1', title: 'Cinematic Drone Shot Over Mountains', promptText: 'Cinematic drone shot flying over majestic mountains at sunrise, golden light, clouds below, smooth motion, 4k quality, epic scale, 10-second video', imageUrl: 'https://via.placeholder.com/300x400/ff6b6b/white?text=Video+Reel', thumbnailUrl: 'https://via.placeholder.com/300x400/ff6b6b/white?text=Custom+Thumbnail', videoUrl: 'https://storage.googleapis.com/mock-bucket/videos/sample-drone.mp4', mediaUrl: 'https://storage.googleapis.com/mock-bucket/videos/sample-drone.mp4', userName: 'Demo Video Creator', userId: 'anonymous', likes: 89, views: 567, uses: 34, copies: 21, commentCount: 12, keywords: ['drone', 'cinematic', 'mountains', 'sunrise', 'video'], category: 'video', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), seoScore: 95, adsenseMigrated: true, fileType: 'video', videoDuration: 10, videoFormat: 'mp4', hasCustomThumbnail: true, price: 0, isPaid: false, salesCount: 0, totalEarnings: 0, purchasedBy: [] }
 ];
 
-// Generate mock news
 function generateMockNews(count) {
   const news = [];
   const categories = ['ai-news', 'prompt-tips', 'industry-updates', 'tutorials', 'video-news'];
   const authors = ['AI News Team', 'Prompt Master', 'Tech Editor', 'Community Manager', 'Video Creator'];
-  
   for (let i = 1; i <= count; i++) {
     const category = categories[Math.floor(Math.random() * categories.length)];
     const author = authors[Math.floor(Math.random() * authors.length)];
-    
     news.push({
       id: `news-${i}`,
       title: `Breaking: New AI Prompt Technique Revolutionizes ${category.replace('-', ' ')}`,
@@ -2915,14 +2374,11 @@ function generateMockNews(count) {
       publishedAt: new Date(Date.now() - i * 3600000).toISOString()
     });
   }
-  
   return news;
 }
 
-// Initialize global mock news
 global.mockNews = generateMockNews(5);
 
-// Helper function for mock comments
 function generateMockComments(count) {
   const names = ['Alex Johnson', 'Sam Wilson', 'Taylor Smith', 'Jordan Lee', 'Casey Brown'];
   const comments = [
@@ -2940,7 +2396,6 @@ function generateMockComments(count) {
     'Perfect for creating Instagram Reels content.',
     'The custom thumbnail looks great!'
   ];
-  
   const mockComments = [];
   for (let i = 0; i < count; i++) {
     mockComments.push({
@@ -2954,31 +2409,17 @@ function generateMockComments(count) {
       isApproved: true
     });
   }
-  
   return mockComments.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 }
 
-// ==================== MARKETPLACE API ENDPOINTS ====================
-
-// Get user's prompts - WITHOUT orderBy to avoid index requirement
+// ==================== MARKETPLACE API ====================
 app.get('/api/user/:userId/prompts', async (req, res) => {
   try {
     const userId = req.params.userId;
-    
     if (db && db.collection) {
-      const snapshot = await db.collection('uploads')
-        .where('userId', '==', userId)
-        .limit(100)
-        .get();
-      
-      const prompts = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-        createdAt: safeDateToString(doc.data().createdAt)
-      }));
-      
+      const snapshot = await db.collection('uploads').where('userId', '==', userId).limit(100).get();
+      const prompts = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data(), createdAt: safeDateToString(doc.data().createdAt) }));
       prompts.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-      
       res.json({ success: true, prompts });
     } else {
       const userPrompts = mockPrompts.filter(p => p.userId === userId || p.userName === 'Demo User');
@@ -2990,17 +2431,11 @@ app.get('/api/user/:userId/prompts', async (req, res) => {
   }
 });
 
-// Get user's sales
 app.get('/api/user/:userId/sales', async (req, res) => {
   try {
     const userId = req.params.userId;
-    
     if (db && db.collection) {
-      const snapshot = await db.collection('sales')
-        .where('sellerId', '==', userId)
-        .limit(100)
-        .get();
-      
+      const snapshot = await db.collection('sales').where('sellerId', '==', userId).limit(100).get();
       const sales = snapshot.docs.map(doc => {
         const data = doc.data();
         return {
@@ -3018,19 +2453,11 @@ app.get('/api/user/:userId/sales', async (req, res) => {
           paymentStatus: data.paymentStatus || 'completed'
         };
       });
-      
       sales.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-      
       res.json({ success: true, sales });
     } else {
       const mockSales = [
-        {
-          promptTitle: 'Fantasy Landscape with Mountains',
-          buyerName: 'Anonymous User',
-          amount: 50,
-          sellerEarnings: 40,
-          date: new Date().toISOString()
-        }
+        { promptTitle: 'Fantasy Landscape with Mountains', buyerName: 'Anonymous User', amount: 50, sellerEarnings: 40, date: new Date().toISOString() }
       ];
       res.json({ success: true, sales: mockSales });
     }
@@ -3040,17 +2467,11 @@ app.get('/api/user/:userId/sales', async (req, res) => {
   }
 });
 
-// Get user's purchases
 app.get('/api/user/:userId/purchases', async (req, res) => {
   try {
     const userId = req.params.userId;
-    
     if (db && db.collection) {
-      const snapshot = await db.collection('purchases')
-        .where('buyerId', '==', userId)
-        .limit(100)
-        .get();
-      
+      const snapshot = await db.collection('purchases').where('buyerId', '==', userId).limit(100).get();
       const purchases = snapshot.docs.map(doc => {
         const data = doc.data();
         return {
@@ -3069,38 +2490,12 @@ app.get('/api/user/:userId/purchases', async (req, res) => {
           paymentStatus: data.paymentStatus || 'completed'
         };
       });
-      
       purchases.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-      
       res.json({ success: true, purchases });
     } else {
       const mockPurchases = [
-        {
-          id: 'purchase-demo-1',
-          promptId: 'demo-2',
-          promptTitle: 'Cyberpunk City Street',
-          promptText: 'Cyberpunk city street at night, neon signs, rainy pavement, futuristic vehicles, Blade Runner style, cinematic lighting',
-          imageUrl: 'https://via.placeholder.com/800x400/8f94fb/white?text=Cyberpunk+City',
-          amount: 50,
-          buyerName: 'You',
-          sellerName: 'Demo User',
-          date: new Date().toISOString(),
-          createdAt: new Date().toISOString(),
-          paymentStatus: 'completed'
-        },
-        {
-          id: 'purchase-demo-2',
-          promptId: 'demo-3',
-          promptTitle: 'Professional Portrait Photography',
-          promptText: 'Professional portrait photography, natural lighting, soft shadows, high detail, 85mm lens, studio quality, professional model',
-          imageUrl: 'https://via.placeholder.com/800x400/20bf6b/white?text=Portrait+Photo',
-          amount: 30,
-          buyerName: 'You',
-          sellerName: 'Demo User',
-          date: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
-          createdAt: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
-          paymentStatus: 'completed'
-        }
+        { id: 'purchase-demo-1', promptId: 'demo-2', promptTitle: 'Cyberpunk City Street', promptText: 'Cyberpunk city street at night, neon signs, rainy pavement, futuristic vehicles, Blade Runner style, cinematic lighting', imageUrl: 'https://via.placeholder.com/800x400/8f94fb/white?text=Cyberpunk+City', amount: 50, buyerName: 'You', sellerName: 'Demo User', date: new Date().toISOString(), createdAt: new Date().toISOString(), paymentStatus: 'completed' },
+        { id: 'purchase-demo-2', promptId: 'demo-3', promptTitle: 'Professional Portrait Photography', promptText: 'Professional portrait photography, natural lighting, soft shadows, high detail, 85mm lens, studio quality, professional model', imageUrl: 'https://via.placeholder.com/800x400/20bf6b/white?text=Portrait+Photo', amount: 30, buyerName: 'You', sellerName: 'Demo User', date: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(), createdAt: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(), paymentStatus: 'completed' }
       ];
       res.json({ success: true, purchases: mockPurchases });
     }
@@ -3110,61 +2505,27 @@ app.get('/api/user/:userId/purchases', async (req, res) => {
   }
 });
 
-// Get user's earnings
 app.get('/api/user/:userId/earnings', async (req, res) => {
   try {
     const userId = req.params.userId;
-    
     if (db && db.collection) {
-      const salesSnapshot = await db.collection('sales')
-        .where('sellerId', '==', userId)
-        .get();
-      
+      const salesSnapshot = await db.collection('sales').where('sellerId', '==', userId).get();
       const earnings = salesSnapshot.docs.map(doc => ({
         promptTitle: doc.data().promptTitle,
         buyerName: doc.data().buyerName,
         amount: doc.data().amount,
         date: safeDateToString(doc.data().createdAt)
       }));
-      
       const totalEarnings = earnings.reduce((sum, e) => sum + Math.round(e.amount * 0.8), 0);
       const totalSales = earnings.length;
-      
-      const promptsSnapshot = await db.collection('uploads')
-        .where('userId', '==', userId)
-        .get();
+      const promptsSnapshot = await db.collection('uploads').where('userId', '==', userId).get();
       const totalPrompts = promptsSnapshot.size;
-      
-      const purchasesSnapshot = await db.collection('purchases')
-        .where('buyerId', '==', userId)
-        .get();
+      const purchasesSnapshot = await db.collection('purchases').where('buyerId', '==', userId).get();
       const totalPurchases = purchasesSnapshot.size;
-      
-      res.json({
-        success: true,
-        earnings,
-        totalEarnings,
-        totalSales,
-        totalPrompts,
-        totalPurchases
-      });
+      res.json({ success: true, earnings, totalEarnings, totalSales, totalPrompts, totalPurchases });
     } else {
-      const mockEarnings = [
-        {
-          promptTitle: 'Fantasy Landscape with Mountains',
-          buyerName: 'Anonymous User',
-          amount: 50,
-          date: new Date().toISOString()
-        }
-      ];
-      res.json({
-        success: true,
-        earnings: mockEarnings,
-        totalEarnings: 40,
-        totalSales: 1,
-        totalPrompts: 3,
-        totalPurchases: 1
-      });
+      const mockEarnings = [{ promptTitle: 'Fantasy Landscape with Mountains', buyerName: 'Anonymous User', amount: 50, date: new Date().toISOString() }];
+      res.json({ success: true, earnings: mockEarnings, totalEarnings: 40, totalSales: 1, totalPrompts: 3, totalPurchases: 1 });
     }
   } catch (error) {
     console.error('Error fetching earnings:', error);
@@ -3172,23 +2533,13 @@ app.get('/api/user/:userId/earnings', async (req, res) => {
   }
 });
 
-// Check if user has purchased a prompt
 app.get('/api/check-purchase/:promptId', async (req, res) => {
   try {
     const promptId = req.params.promptId;
     const userId = req.query.userId;
-    
-    if (!userId) {
-      return res.json({ purchased: false });
-    }
-    
+    if (!userId) return res.json({ purchased: false });
     if (db && db.collection) {
-      const purchaseSnapshot = await db.collection('purchases')
-        .where('promptId', '==', promptId)
-        .where('buyerId', '==', userId)
-        .limit(1)
-        .get();
-      
+      const purchaseSnapshot = await db.collection('purchases').where('promptId', '==', promptId).where('buyerId', '==', userId).limit(1).get();
       res.json({ purchased: !purchaseSnapshot.empty });
     } else {
       res.json({ purchased: false });
@@ -3199,33 +2550,21 @@ app.get('/api/check-purchase/:promptId', async (req, res) => {
   }
 });
 
-// Complete purchase after successful payment
 app.post('/api/complete-purchase', async (req, res) => {
     try {
         const { promptId, userId, userEmail, amount, paymentId } = req.body;
-        
-        if (!promptId || !userId) {
-            return res.status(400).json({ error: 'Missing required fields' });
-        }
-        
+        if (!promptId || !userId) return res.status(400).json({ error: 'Missing required fields' });
         const result = await completePurchaseHelper(promptId, userId, userEmail, amount, paymentId);
         res.json(result);
-        
     } catch (error) {
         console.error('Purchase completion error:', error);
-        res.status(500).json({ 
-            error: 'Failed to complete purchase',
-            details: error.message 
-        });
+        res.status(500).json({ error: 'Failed to complete purchase', details: error.message });
     }
 });
 
-// ==================== ADMIN CONFIGURATION ====================
+// ==================== ADMIN ====================
 const ADMIN_EMAILS = ['shaikhmujahid771@gmail.com', 'mujjuchatbot@gmail.com'];
 
-// ==================== OWNER / ADMIN ENDPOINTS ====================
-
-// Middleware to check if user is admin
 async function isAdmin(req, res, next) {
   try {
     const authHeader = req.headers.authorization;
@@ -3233,9 +2572,7 @@ async function isAdmin(req, res, next) {
       console.log('No token provided for admin check');
       return res.status(401).json({ error: 'No token provided' });
     }
-
     const idToken = authHeader.split('Bearer ')[1];
-    
     if (!adminInitialized || !admin.auth) {
       console.log('Firebase Admin not initialized, using mock admin');
       if (process.env.NODE_ENV === 'development') {
@@ -3244,12 +2581,9 @@ async function isAdmin(req, res, next) {
       }
       return res.status(403).json({ error: 'Admin authentication not configured' });
     }
-    
     const decodedToken = await admin.auth().verifyIdToken(idToken);
     const email = decodedToken.email;
-    
     console.log('Admin check for email:', email);
-    
     if (ADMIN_EMAILS.includes(email)) {
       req.user = decodedToken;
       console.log('Admin access granted for:', email);
@@ -3264,74 +2598,36 @@ async function isAdmin(req, res, next) {
   }
 }
 
-// Get all sellers with their info and earnings
 app.get('/api/owner/sellers', async (req, res) => {
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'No token provided' });
-  }
-  
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'No token provided' });
   const idToken = authHeader.split('Bearer ')[1];
-  
   try {
-    if (!adminInitialized || !admin.auth) {
-      throw new Error('Admin not initialized');
-    }
+    if (!adminInitialized || !admin.auth) throw new Error('Admin not initialized');
     const decodedToken = await admin.auth().verifyIdToken(idToken);
-    const email = decodedToken.email;
-    
-    if (!ADMIN_EMAILS.includes(email)) {
-      return res.status(403).json({ error: 'Unauthorized' });
-    }
+    if (!ADMIN_EMAILS.includes(decodedToken.email)) return res.status(403).json({ error: 'Unauthorized' });
   } catch (error) {
     console.error('Admin auth error:', error);
     return res.status(401).json({ error: 'Authentication failed' });
   }
-  
   try {
     let sellers = [];
-
     if (db && db.collection) {
       const sellersSnapshot = await db.collection('sellerInfo').get();
       for (const doc of sellersSnapshot.docs) {
         const sellerData = doc.data();
         const userId = doc.id;
-
         let totalEarnings = 0;
         const salesSnapshot = await db.collection('sales').where('sellerId', '==', userId).get();
         totalEarnings = salesSnapshot.docs.reduce((sum, d) => sum + (d.data().sellerEarnings || 0), 0);
-
         let totalPaidOut = 0;
         const payoutsSnapshot = await db.collection('payouts').where('sellerId', '==', userId).get();
         totalPaidOut = payoutsSnapshot.docs.reduce((sum, d) => sum + (d.data().amount || 0), 0);
-
-        sellers.push({
-          userId,
-          ...sellerData,
-          totalEarnings,
-          totalPaidOut,
-          availableBalance: totalEarnings - totalPaidOut
-        });
+        sellers.push({ userId, ...sellerData, totalEarnings, totalPaidOut, availableBalance: totalEarnings - totalPaidOut });
       }
     } else {
-      sellers = [
-        {
-          userId: 'demo-seller-1',
-          name: 'Demo Seller',
-          email: 'seller@example.com',
-          upiId: 'seller@okhdfcbank',
-          bankAccount: '1234567890',
-          bankIfsc: 'HDFC0001234',
-          bankName: 'HDFC Bank',
-          status: 'approved',
-          totalEarnings: 800,
-          totalPaidOut: 500,
-          availableBalance: 300,
-          createdAt: new Date().toISOString()
-        }
-      ];
+      sellers = [{ userId: 'demo-seller-1', name: 'Demo Seller', email: 'seller@example.com', upiId: 'seller@okhdfcbank', bankAccount: '1234567890', bankIfsc: 'HDFC0001234', bankName: 'HDFC Bank', status: 'approved', totalEarnings: 800, totalPaidOut: 500, availableBalance: 300, createdAt: new Date().toISOString() }];
     }
-
     res.json({ success: true, sellers });
   } catch (error) {
     console.error('Error fetching sellers:', error);
@@ -3339,53 +2635,26 @@ app.get('/api/owner/sellers', async (req, res) => {
   }
 });
 
-// Get all sales
 app.get('/api/owner/sales', async (req, res) => {
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'No token provided' });
-  }
-  
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'No token provided' });
   const idToken = authHeader.split('Bearer ')[1];
-  
   try {
-    if (!adminInitialized || !admin.auth) {
-      throw new Error('Admin not initialized');
-    }
+    if (!adminInitialized || !admin.auth) throw new Error('Admin not initialized');
     const decodedToken = await admin.auth().verifyIdToken(idToken);
-    const email = decodedToken.email;
-    
-    if (!ADMIN_EMAILS.includes(email)) {
-      return res.status(403).json({ error: 'Unauthorized' });
-    }
+    if (!ADMIN_EMAILS.includes(decodedToken.email)) return res.status(403).json({ error: 'Unauthorized' });
   } catch (error) {
     console.error('Admin auth error:', error);
     return res.status(401).json({ error: 'Authentication failed' });
   }
-  
   try {
     let sales = [];
-
     if (db && db.collection) {
-      const snapshot = await db.collection('sales')
-        .orderBy('createdAt', 'desc')
-        .limit(500)
-        .get();
+      const snapshot = await db.collection('sales').orderBy('createdAt', 'desc').limit(500).get();
       sales = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     } else {
-      sales = [
-        {
-          id: 'sale-1',
-          promptTitle: 'Fantasy Landscape',
-          buyerName: 'User1',
-          sellerName: 'Demo Seller',
-          amount: 50,
-          sellerEarnings: 40,
-          createdAt: new Date().toISOString()
-        }
-      ];
+      sales = [{ id: 'sale-1', promptTitle: 'Fantasy Landscape', buyerName: 'User1', sellerName: 'Demo Seller', amount: 50, sellerEarnings: 40, createdAt: new Date().toISOString() }];
     }
-
     res.json({ success: true, sales });
   } catch (error) {
     console.error('Error fetching sales:', error);
@@ -3393,52 +2662,26 @@ app.get('/api/owner/sales', async (req, res) => {
   }
 });
 
-// Get all purchases
 app.get('/api/owner/purchases', async (req, res) => {
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'No token provided' });
-  }
-  
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'No token provided' });
   const idToken = authHeader.split('Bearer ')[1];
-  
   try {
-    if (!adminInitialized || !admin.auth) {
-      throw new Error('Admin not initialized');
-    }
+    if (!adminInitialized || !admin.auth) throw new Error('Admin not initialized');
     const decodedToken = await admin.auth().verifyIdToken(idToken);
-    const email = decodedToken.email;
-    
-    if (!ADMIN_EMAILS.includes(email)) {
-      return res.status(403).json({ error: 'Unauthorized' });
-    }
+    if (!ADMIN_EMAILS.includes(decodedToken.email)) return res.status(403).json({ error: 'Unauthorized' });
   } catch (error) {
     console.error('Admin auth error:', error);
     return res.status(401).json({ error: 'Authentication failed' });
   }
-  
   try {
     let purchases = [];
-
     if (db && db.collection) {
-      const snapshot = await db.collection('purchases')
-        .orderBy('createdAt', 'desc')
-        .limit(500)
-        .get();
+      const snapshot = await db.collection('purchases').orderBy('createdAt', 'desc').limit(500).get();
       purchases = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     } else {
-      purchases = [
-        {
-          id: 'purchase-1',
-          promptTitle: 'Cyberpunk City',
-          buyerName: 'User2',
-          sellerName: 'Demo Seller',
-          amount: 50,
-          createdAt: new Date().toISOString()
-        }
-      ];
+      purchases = [{ id: 'purchase-1', promptTitle: 'Cyberpunk City', buyerName: 'User2', sellerName: 'Demo Seller', amount: 50, createdAt: new Date().toISOString() }];
     }
-
     res.json({ success: true, purchases });
   } catch (error) {
     console.error('Error fetching purchases:', error);
@@ -3446,44 +2689,27 @@ app.get('/api/owner/purchases', async (req, res) => {
   }
 });
 
-// Get all pending payouts
 app.get('/api/owner/pending-payouts', async (req, res) => {
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'No token provided' });
-  }
-  
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'No token provided' });
   const idToken = authHeader.split('Bearer ')[1];
-  
   try {
-    if (!adminInitialized || !admin.auth) {
-      throw new Error('Admin not initialized');
-    }
+    if (!adminInitialized || !admin.auth) throw new Error('Admin not initialized');
     const decodedToken = await admin.auth().verifyIdToken(idToken);
-    const email = decodedToken.email;
-    
-    if (!ADMIN_EMAILS.includes(email)) {
-      return res.status(403).json({ error: 'Unauthorized' });
-    }
+    if (!ADMIN_EMAILS.includes(decodedToken.email)) return res.status(403).json({ error: 'Unauthorized' });
   } catch (error) {
     console.error('Admin auth error:', error);
     return res.status(401).json({ error: 'Authentication failed' });
   }
-  
   try {
     let payouts = [];
-
     if (db && db.collection) {
-      const snapshot = await db.collection('payouts')
-        .where('status', '==', 'pending')
-        .orderBy('createdAt', 'asc')
-        .get();
+      const snapshot = await db.collection('payouts').where('status', '==', 'pending').orderBy('createdAt', 'asc').get();
       payouts = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       console.log(`Found ${payouts.length} pending payouts`);
     } else {
       payouts = (global.payouts || []).filter(p => p.status === 'pending');
     }
-
     res.json({ success: true, payouts });
   } catch (error) {
     console.error('Error fetching pending payouts:', error);
@@ -3491,34 +2717,21 @@ app.get('/api/owner/pending-payouts', async (req, res) => {
   }
 });
 
-// Mark payout as paid
 app.post('/api/owner/payout/:payoutId', async (req, res) => {
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'No token provided' });
-  }
-  
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'No token provided' });
   const idToken = authHeader.split('Bearer ')[1];
-  
   try {
-    if (!adminInitialized || !admin.auth) {
-      throw new Error('Admin not initialized');
-    }
+    if (!adminInitialized || !admin.auth) throw new Error('Admin not initialized');
     const decodedToken = await admin.auth().verifyIdToken(idToken);
-    const email = decodedToken.email;
-    
-    if (!ADMIN_EMAILS.includes(email)) {
-      return res.status(403).json({ error: 'Unauthorized' });
-    }
+    if (!ADMIN_EMAILS.includes(decodedToken.email)) return res.status(403).json({ error: 'Unauthorized' });
   } catch (error) {
     console.error('Admin auth error:', error);
     return res.status(401).json({ error: 'Authentication failed' });
   }
-  
   try {
     const payoutId = req.params.payoutId;
     const { transactionId, notes } = req.body;
-
     if (db && db.collection) {
       await db.collection('payouts').doc(payoutId).update({
         status: 'paid',
@@ -3537,7 +2750,6 @@ app.post('/api/owner/payout/:payoutId', async (req, res) => {
         console.log(`Demo: Payout ${payoutId} marked as paid`);
       }
     }
-
     res.json({ success: true, message: 'Payout marked as paid' });
   } catch (error) {
     console.error('Error updating payout:', error);
@@ -3545,22 +2757,14 @@ app.post('/api/owner/payout/:payoutId', async (req, res) => {
   }
 });
 
-// Check if current user is admin
 app.get('/api/check-admin', async (req, res) => {
     try {
         const authHeader = req.headers.authorization;
-        if (!authHeader || !authHeader.startsWith('Bearer ')) {
-            return res.json({ isAdmin: false });
-        }
-        
-        if (!adminInitialized || !admin.auth) {
-            return res.json({ isAdmin: true });
-        }
-        
+        if (!authHeader || !authHeader.startsWith('Bearer ')) return res.json({ isAdmin: false });
+        if (!adminInitialized || !admin.auth) return res.json({ isAdmin: true });
         const idToken = authHeader.split('Bearer ')[1];
         const decodedToken = await admin.auth().verifyIdToken(idToken);
-        const email = decodedToken.email;
-        const isAdmin = ADMIN_EMAILS.includes(email);
+        const isAdmin = ADMIN_EMAILS.includes(decodedToken.email);
         res.json({ isAdmin });
     } catch (error) {
         console.error('Admin check error:', error);
@@ -3568,26 +2772,19 @@ app.get('/api/check-admin', async (req, res) => {
     }
 });
 
-// ==================== AFFILIATE PROGRAM (PER-USER) ====================
-
-// Get all affiliates (public) or filtered by userId
+// ==================== AFFILIATE PROGRAM ====================
 app.get('/api/affiliates', async (req, res) => {
   try {
     const userId = req.query.userId;
     let affiliates = [];
-    
     if (db && db.collection) {
       let query = db.collection('affiliates').orderBy('addedAt', 'desc');
-      if (userId) {
-        query = query.where('userId', '==', userId);
-      }
+      if (userId) query = query.where('userId', '==', userId);
       const snapshot = await query.get();
       affiliates = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     } else {
       affiliates = global.affiliates || [];
-      if (userId) {
-        affiliates = affiliates.filter(a => a.userId === userId);
-      }
+      if (userId) affiliates = affiliates.filter(a => a.userId === userId);
     }
     res.json({ success: true, affiliates });
   } catch (error) {
@@ -3596,40 +2793,22 @@ app.get('/api/affiliates', async (req, res) => {
   }
 });
 
-// Add affiliate (any logged-in user)
 app.post('/api/affiliates', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'Authentication required' });
-    }
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Authentication required' });
     const idToken = authHeader.split('Bearer ')[1];
     let userId;
     try {
       const decodedToken = await admin.auth().verifyIdToken(idToken);
       userId = decodedToken.uid;
     } catch (e) {
-      // In development, allow mock user
-      if (!adminInitialized) {
-        userId = 'mock-user-' + Date.now();
-      } else {
-        throw e;
-      }
+      if (!adminInitialized) userId = 'mock-user-' + Date.now();
+      else throw e;
     }
-    
-    const { url, title, image, description } = req.body;
-    if (!url || !title) {
-      return res.status(400).json({ error: 'URL and title are required' });
-    }
-    
-    const affiliateData = {
-      userId,
-      url,
-      title,
-      image: image || '',
-      description: description || '',
-      addedAt: new Date().toISOString()
-    };
+    const { url, url2, title, image, description } = req.body;
+    if (!url || !title) return res.status(400).json({ error: 'URL and title are required' });
+    const affiliateData = { userId, url, url2: url2 || null, title, image: image || '', description: description || '', addedAt: new Date().toISOString() };
     let id;
     if (db && db.collection) {
       const docRef = await db.collection('affiliates').add(affiliateData);
@@ -3647,13 +2826,10 @@ app.post('/api/affiliates', async (req, res) => {
   }
 });
 
-// Delete affiliate (only if it belongs to the logged-in user or admin)
 app.delete('/api/affiliates/:id', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'Authentication required' });
-    }
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Authentication required' });
     const idToken = authHeader.split('Bearer ')[1];
     let userId;
     let isAdminUser = false;
@@ -3662,13 +2838,9 @@ app.delete('/api/affiliates/:id', async (req, res) => {
       userId = decodedToken.uid;
       isAdminUser = ADMIN_EMAILS.includes(decodedToken.email);
     } catch (e) {
-      if (!adminInitialized) {
-        userId = 'mock-user';
-      } else {
-        throw e;
-      }
+      if (!adminInitialized) userId = 'mock-user';
+      else throw e;
     }
-    
     const id = req.params.id;
     let affiliate;
     if (db && db.collection) {
@@ -3679,16 +2851,9 @@ app.delete('/api/affiliates/:id', async (req, res) => {
       affiliate = (global.affiliates || []).find(a => a.id === id);
       if (!affiliate) return res.status(404).json({ error: 'Affiliate not found' });
     }
-    
-    if (affiliate.userId !== userId && !isAdminUser) {
-      return res.status(403).json({ error: 'You can only delete your own affiliates' });
-    }
-    
-    if (db && db.collection) {
-      await db.collection('affiliates').doc(id).delete();
-    } else {
-      global.affiliates = (global.affiliates || []).filter(a => a.id !== id);
-    }
+    if (affiliate.userId !== userId && !isAdminUser) return res.status(403).json({ error: 'You can only delete your own affiliates' });
+    if (db && db.collection) await db.collection('affiliates').doc(id).delete();
+    else global.affiliates = (global.affiliates || []).filter(a => a.id !== id);
     res.json({ success: true });
   } catch (error) {
     console.error('Error deleting affiliate:', error);
@@ -3696,51 +2861,57 @@ app.delete('/api/affiliates/:id', async (req, res) => {
   }
 });
 
-// 🔥 FIXED: Helper to get affiliates for a specific user (shuffled)
 async function getAffiliatesByUser(userId, count = 3) {
-  // ✅ Return early if userId is missing
-  if (!userId) {
-    return [];
-  }
-
+  if (!userId) return [];
   let affiliates = [];
   if (db && db.collection) {
-    const snapshot = await db.collection('affiliates')
-      .where('userId', '==', userId)
-      .get();
+    const snapshot = await db.collection('affiliates').where('userId', '==', userId).get();
     affiliates = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
   } else {
     affiliates = (global.affiliates || []).filter(a => a.userId === userId);
   }
-  // Shuffle and return requested count
   const shuffled = affiliates.sort(() => 0.5 - Math.random());
   return shuffled.slice(0, count);
 }
 
-// ==================== SELLER INFO & PAYOUT ENDPOINTS ====================
+// ==================== AFFILIATE HTML GENERATOR ====================
+function generateAffiliateHTML(affiliate) {
+  if (!affiliate) return '';
+  const { url, url2, title, image, description } = affiliate;
 
-// Save seller information
+  // Escape for safe onclick attribute
+  const safeUrl = (url || '').replace(/'/g, "\\'");
+  const safeUrl2 = url2 ? url2.replace(/'/g, "\\'") : '';
+  const openFunc = `openAffiliateUrls('${safeUrl}', '${safeUrl2}')`;
+
+  return `
+    <div class="affiliate-container" onclick="${openFunc}" style="cursor:pointer;">
+      <div class="ad-label">🌟 Sponsored</div>
+      <div class="affiliate-content">
+        ${image ? `<img src="${image}" alt="${title || 'Sponsored'}" class="affiliate-image" onerror="this.style.display='none'">` : ''}
+        <div class="affiliate-info">
+          <h4>${title || 'Sponsored Product'}</h4>
+          ${description ? `<p>${description}</p>` : ''}
+          <span class="affiliate-cta">View Products →</span>
+          ${url2 ? `<div style="font-size:0.75rem;color:#888;margin-top:4px;">Includes bonus offer</div>` : ''}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// ==================== SELLER INFO & PAYOUT ====================
 app.post('/api/seller-info', async (req, res) => {
   try {
     const { userId, name, email, upiId, bankAccount, bankIfsc, bankName, pan } = req.body;
-    if (!userId || !name || !email) {
-      return res.status(400).json({ error: 'Missing required fields' });
-    }
-
+    if (!userId || !name || !email) return res.status(400).json({ error: 'Missing required fields' });
     const sellerData = sanitizeFirestoreData({
-      userId,
-      name,
-      email,
-      upiId: upiId || null,
-      bankAccount: bankAccount || null,
-      bankIfsc: bankIfsc || null,
-      bankName: bankName || null,
-      pan: pan || null,
+      userId, name, email,
+      upiId: upiId || null, bankAccount: bankAccount || null,
+      bankIfsc: bankIfsc || null, bankName: bankName || null, pan: pan || null,
       status: 'pending',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
     });
-
     if (db && db.collection) {
       await db.collection('sellerInfo').doc(userId).set(sellerData, { merge: true });
       console.log(`✅ Seller info saved for user: ${userId}`);
@@ -3756,19 +2927,16 @@ app.post('/api/seller-info', async (req, res) => {
   }
 });
 
-// Get seller info for a user
 app.get('/api/seller-info/:userId', async (req, res) => {
   try {
     const userId = req.params.userId;
     let sellerInfo = null;
-
     if (db && db.collection) {
       const doc = await db.collection('sellerInfo').doc(userId).get();
       if (doc.exists) sellerInfo = doc.data();
     } else {
       sellerInfo = global.sellerInfo?.[userId] || null;
     }
-
     res.json({ success: true, sellerInfo });
   } catch (error) {
     console.error('Error fetching seller info:', error);
@@ -3776,14 +2944,10 @@ app.get('/api/seller-info/:userId', async (req, res) => {
   }
 });
 
-// Request a payout
 app.post('/api/request-payout', async (req, res) => {
   try {
     const { userId, amount } = req.body;
-    if (!userId || !amount || amount < 100) {
-      return res.status(400).json({ error: 'Invalid payout request' });
-    }
-
+    if (!userId || !amount || amount < 100) return res.status(400).json({ error: 'Invalid payout request' });
     let sellerInfo = null;
     if (db && db.collection) {
       const doc = await db.collection('sellerInfo').doc(userId).get();
@@ -3791,37 +2955,24 @@ app.post('/api/request-payout', async (req, res) => {
     } else {
       sellerInfo = global.sellerInfo?.[userId] || null;
     }
-    if (!sellerInfo) {
-      return res.status(400).json({ error: 'Please complete seller information first' });
-    }
-
+    if (!sellerInfo) return res.status(400).json({ error: 'Please complete seller information first' });
     let totalEarnings = 0;
     let totalPaidOut = 0;
-
     if (db && db.collection) {
       const salesSnapshot = await db.collection('sales').where('sellerId', '==', userId).get();
       totalEarnings = salesSnapshot.docs.reduce((sum, doc) => sum + (doc.data().sellerEarnings || 0), 0);
-
       const payoutsSnapshot = await db.collection('payouts').where('sellerId', '==', userId).get();
       totalPaidOut = payoutsSnapshot.docs.reduce((sum, doc) => sum + (doc.data().amount || 0), 0);
     } else {
       totalEarnings = 500;
       totalPaidOut = 0;
     }
-
     const available = totalEarnings - totalPaidOut;
-    if (available < amount) {
-      return res.status(400).json({ error: `Insufficient balance. Available: ₹${available}` });
-    }
-
+    if (available < amount) return res.status(400).json({ error: `Insufficient balance. Available: ₹${available}` });
     const payoutRequest = sanitizeFirestoreData({
-      sellerId: userId,
-      amount,
-      status: 'pending',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+      sellerId: userId, amount, status: 'pending',
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
     });
-
     if (db && db.collection) {
       await db.collection('payouts').add(payoutRequest);
       console.log(`✅ Payout request created for user ${userId}: ₹${amount}`);
@@ -3829,7 +2980,6 @@ app.post('/api/request-payout', async (req, res) => {
       if (!global.payouts) global.payouts = [];
       global.payouts.push({ id: 'mock-' + Date.now(), ...payoutRequest });
     }
-
     res.json({ success: true, message: 'Payout request submitted' });
   } catch (error) {
     console.error('Error requesting payout:', error);
@@ -3837,23 +2987,16 @@ app.post('/api/request-payout', async (req, res) => {
   }
 });
 
-// Get payout history for a user
 app.get('/api/user/:userId/payouts', async (req, res) => {
   try {
     const userId = req.params.userId;
     let payouts = [];
-
     if (db && db.collection) {
-      const snapshot = await db.collection('payouts')
-        .where('sellerId', '==', userId)
-        .orderBy('createdAt', 'desc')
-        .limit(50)
-        .get();
+      const snapshot = await db.collection('payouts').where('sellerId', '==', userId).orderBy('createdAt', 'desc').limit(50).get();
       payouts = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     } else {
       payouts = (global.payouts || []).filter(p => p.sellerId === userId);
     }
-
     res.json({ success: true, payouts });
   } catch (error) {
     console.error('Error fetching payouts:', error);
@@ -3861,40 +3004,25 @@ app.get('/api/user/:userId/payouts', async (req, res) => {
   }
 });
 
-// Delete prompt
 app.delete('/api/prompt/:id', async (req, res) => {
   try {
     const promptId = req.params.id;
     const userId = req.query.userId;
-    
-    if (!userId) {
-      return res.status(401).json({ error: 'Authentication required' });
-    }
-    
+    if (!userId) return res.status(401).json({ error: 'Authentication required' });
     if (db && db.collection) {
       const promptDoc = await db.collection('uploads').doc(promptId).get();
-      
-      if (!promptDoc.exists) {
-        return res.status(404).json({ error: 'Prompt not found' });
-      }
-      
+      if (!promptDoc.exists) return res.status(404).json({ error: 'Prompt not found' });
       const promptData = promptDoc.data();
-      
       if (promptData.userId !== userId && promptData.userId !== 'anonymous') {
         return res.status(403).json({ error: 'You do not have permission to delete this prompt' });
       }
-      
       await db.collection('uploads').doc(promptId).delete();
-      
       cache.del(`prompt-${promptId}`);
       cache.del(`uploads-page-1`);
-      
       res.json({ success: true, message: 'Prompt deleted successfully' });
     } else {
       const index = mockPrompts.findIndex(p => p.id === promptId);
-      if (index !== -1) {
-        mockPrompts.splice(index, 1);
-      }
+      if (index !== -1) mockPrompts.splice(index, 1);
       res.json({ success: true, message: 'Prompt deleted successfully' });
     }
   } catch (error) {
@@ -3903,79 +3031,36 @@ app.delete('/api/prompt/:id', async (req, res) => {
   }
 });
 
-// Health check endpoint
+// ==================== HEALTH ====================
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
+  res.json({
+    status: 'OK',
     timestamp: new Date().toISOString(),
     service: 'tools prompt API',
     mode: db ? 'production' : 'development',
     storage: 'Cloudflare R2 (zero egress)',
     cacheStats: cache.getStats(),
-    adsense: {
-      enabled: true,
-      clientId: process.env.ADSENSE_CLIENT_ID || 'ca-pub-5992381116749724'
-    },
-    adsterra: {
-      enabled: true,
-      nativeAd: 'aca55beb03e2d8b514ae3f122920bdf0',
-      desktopBanner: '8719e4636a7c41462203d84e956177c4',
-      mobileBanner: '37e3a123e9b664f6f0b0efed6c7ee71f'
-    },
-    features: {
-      comments: true,
-      news: true,
-      caching: true,
-      miniBrowser: true,
-      videoUploads: true,
-      youtubeShorts: true,
-      customThumbnails: true,
-      marketplace: true,
-      downloadAppButton: true,
-      affiliateProgram: true
-    },
-    uploadLimits: {
-      maxFileSize: '100MB',
-      allowedImageTypes: ['image/jpeg', 'image/png', 'image/webp', 'image/gif'],
-      allowedVideoTypes: ['video/mp4', 'video/webm', 'video/quicktime', 'video/x-msvideo', 'video/mpeg', 'video/ogg'],
-      maxVideoDuration: '60 seconds (recommended for reels)',
-      thumbnailSupport: true,
-      thumbnailMaxSize: '5MB'
-    },
-    aiModels: {
-      photo: AIModelManager.getPhotoModelCount(),
-      video: AIModelManager.getVideoModelCount(),
-      total: AIModelManager.getPhotoModelCount() + AIModelManager.getVideoModelCount()
-    }
+    adsense: { enabled: true, clientId: process.env.ADSENSE_CLIENT_ID || 'ca-pub-5992381116749724' },
+    adsterra: { enabled: true, nativeAd: 'aca55beb03e2d8b514ae3f122920bdf0', desktopBanner: '8719e4636a7c41462203d84e956177c4', mobileBanner: '37e3a123e9b664f6f0b0efed6c7ee71f' },
+    features: { comments: true, news: true, caching: true, miniBrowser: true, videoUploads: true, youtubeShorts: true, customThumbnails: true, marketplace: true, downloadAppButton: true, affiliateProgram: true, socialFeed: true, liveChat: true, notifications: true, channels: true, community: true, ownerEdit: true },
+    uploadLimits: { maxFileSize: '100MB', allowedImageTypes: ['image/jpeg', 'image/png', 'image/webp', 'image/gif'], allowedVideoTypes: ['video/mp4', 'video/webm', 'video/quicktime', 'video/x-msvideo', 'video/mpeg', 'video/ogg'], maxVideoDuration: '60 seconds (recommended for reels)', thumbnailSupport: true, thumbnailMaxSize: '5MB' },
+    aiModels: { photo: AIModelManager.getPhotoModelCount(), video: AIModelManager.getVideoModelCount(), total: AIModelManager.getPhotoModelCount() + AIModelManager.getVideoModelCount() }
   });
 });
 
-// Video streaming endpoint - NOW REDIRECTS TO R2
 app.get('/api/video/:videoId', async (req, res) => {
   try {
     const videoId = req.params.videoId;
-    
     let promptData;
     if (db && db.collection) {
       const doc = await db.collection('uploads').doc(videoId).get();
-      if (doc.exists) {
-        promptData = doc.data();
-      }
+      if (doc.exists) promptData = doc.data();
     } else {
       promptData = mockPrompts.find(p => p.id === videoId);
     }
-    
     if (!promptData) return res.status(404).send('Video not found');
-
     const videoUrl = promptData.videoUrl || promptData.mediaUrl;
-    // If it's an R2 URL, redirect to it (no server streaming)
-    if (videoUrl && videoUrl.includes('r2.dev')) {
-      return res.redirect(videoUrl);
-    }
-
-    // Fallback: if the URL is still Firebase, we can’t stream it via R2,
-    // so we return a 404 (or you can keep the old streaming logic for migration)
-    // But since we are migrating, we will serve a placeholder.
+    if (videoUrl && videoUrl.includes('r2.dev')) return res.redirect(videoUrl);
     res.status(404).send('Video not available on R2. Please re-upload.');
   } catch (error) {
     console.error('Video streaming error:', error);
@@ -3983,19 +3068,15 @@ app.get('/api/video/:videoId', async (req, res) => {
   }
 });
 
-// Thumbnail endpoint - REDIRECT TO R2
 app.get('/api/thumbnail/:promptId', async (req, res) => {
   try {
     const promptId = req.params.promptId;
-    
     if (db && db.collection) {
       const doc = await db.collection('uploads').doc(promptId).get();
       if (doc.exists) {
         const data = doc.data();
         const thumbnailUrl = data.thumbnailUrl || data.imageUrl;
-        if (thumbnailUrl && thumbnailUrl.includes('r2.dev')) {
-          return res.redirect(thumbnailUrl);
-        }
+        if (thumbnailUrl && thumbnailUrl.includes('r2.dev')) return res.redirect(thumbnailUrl);
       }
     }
     res.redirect('https://via.placeholder.com/300x400/ff6b6b/ffffff?text=Video+Reel');
@@ -4005,46 +3086,25 @@ app.get('/api/thumbnail/:promptId', async (req, res) => {
   }
 });
 
-// AdSense Migration Endpoint
 app.get('/admin/migrate-adsense', async (req, res) => {
   try {
     console.log('🚀 Starting AdSense migration via admin endpoint...');
-    
     const migratedCount = await migrateExistingPromptsForAdSense();
-    
-    res.json({
-      success: true,
-      message: `🎉 Successfully migrated ${migratedCount} prompts for AdSense monetization`,
-      migratedCount: migratedCount,
-      timestamp: new Date().toISOString()
-    });
+    res.json({ success: true, message: `🎉 Successfully migrated ${migratedCount} prompts for AdSense monetization`, migratedCount, timestamp: new Date().toISOString() });
   } catch (error) {
     console.error('❌ Migration endpoint error:', error);
-    res.status(500).json({ 
-      error: 'Migration failed', 
-      details: error.message,
-      timestamp: new Date().toISOString()
-    });
+    res.status(500).json({ error: 'Migration failed', details: error.message, timestamp: new Date().toISOString() });
   }
 });
 
-// Dynamic Robots.txt
+// ==================== ROBOTS & SITEMAPS ====================
 app.get('/robots.txt', (req, res) => {
   const domain = req.get('host');
-  
   let protocol = 'https';
-  if (req.secure) {
-    protocol = 'https';
-  } else if (req.headers['x-forwarded-proto'] === 'https') {
-    protocol = 'https';
-  } else if (domain.includes('toolsprompt.com')) {
-    protocol = 'https';
-  } else {
-    protocol = req.protocol;
-  }
-  
-  const currentBaseUrl = `${protocol}://${domain}`;
-  
+  if (req.secure) protocol = 'https';
+  else if (req.headers['x-forwarded-proto'] === 'https') protocol = 'https';
+  else if (domain.includes('toolsprompt.com')) protocol = 'https';
+  else protocol = req.protocol;
   const robotsTxt = `User-agent: *
 Allow: /
 Disallow: /admin/
@@ -4053,103 +3113,70 @@ Disallow: /api/
 Sitemap: https://www.toolsprompt.com/sitemap.xml
 Sitemap: https://www.toolsprompt.com/sitemap-posts.xml
 Sitemap: https://www.toolsprompt.com/sitemap-news.xml
+Sitemap: https://www.toolsprompt.com/sitemap-channels.xml
 Sitemap: https://www.toolsprompt.com/sitemap-pages.xml`;
-
   res.set('Content-Type', 'text/plain');
   res.set('Cache-Control', 'public, max-age=3600');
   res.send(robotsTxt);
 });
 
-// Dynamic Sitemap Index
 app.get('/sitemap.xml', async (req, res) => {
   try {
     const baseUrl = process.env.BASE_URL || `https://${req.get('host')}`;
-    
     const sitemapIndex = `<?xml version="1.0" encoding="UTF-8"?>
 <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <sitemap>
-    <loc>${baseUrl}/sitemap-pages.xml</loc>
-    <lastmod>${new Date().toISOString()}</lastmod>
-  </sitemap>
-  <sitemap>
-    <loc>${baseUrl}/sitemap-posts.xml</loc>
-    <lastmod>${new Date().toISOString()}</lastmod>
-  </sitemap>
-  <sitemap>
-    <loc>${baseUrl}/sitemap-news.xml</loc>
-    <lastmod>${new Date().toISOString()}</lastmod>
-  </sitemap>
+  <sitemap><loc>${baseUrl}/sitemap-pages.xml</loc><lastmod>${new Date().toISOString()}</lastmod></sitemap>
+  <sitemap><loc>${baseUrl}/sitemap-posts.xml</loc><lastmod>${new Date().toISOString()}</lastmod></sitemap>
+  <sitemap><loc>${baseUrl}/sitemap-news.xml</loc><lastmod>${new Date().toISOString()}</lastmod></sitemap>
+  <sitemap><loc>${baseUrl}/sitemap-channels.xml</loc><lastmod>${new Date().toISOString()}</lastmod></sitemap>
 </sitemapindex>`;
-
     res.set('Content-Type', 'application/xml');
     res.send(sitemapIndex);
-    
   } catch (error) {
     console.error('❌ Sitemap index error:', error);
     res.status(500).send('Error generating sitemap');
   }
 });
 
-// Pages Sitemap
 app.get('/sitemap-pages.xml', async (req, res) => {
   try {
     const baseUrl = process.env.BASE_URL || `https://${req.get('host')}`;
-    
     const pages = [
       { loc: baseUrl + '/', lastmod: new Date().toISOString(), changefreq: 'daily', priority: '1.0' },
-      { loc: baseUrl + '/index.html', lastmod: new Date().toISOString(), changefreq: 'daily', priority: '0.9' },
-      { loc: baseUrl + '/promptconverter.html', lastmod: new Date().toISOString(), changefreq: 'daily', priority: '0.8' },
-      { loc: baseUrl + '/howitworks.html', lastmod: new Date().toISOString(), changefreq: 'daily', priority: '0.8' },
-      { loc: baseUrl + '/login.html', lastmod: new Date().toISOString(), changefreq: 'daily', priority: '0.5' },
-      { loc: baseUrl + '/dashboard.html', lastmod: new Date().toISOString(), changefreq: 'daily', priority: '0.7' }
+      { loc: baseUrl + '/login.html', lastmod: new Date().toISOString(), changefreq: 'monthly', priority: '0.5' },
+      { loc: baseUrl + '/dashboard.html', lastmod: new Date().toISOString(), changefreq: 'monthly', priority: '0.7' }
     ];
-
     const sitemap = SitemapGenerator.generateSitemap(pages);
     res.set('Content-Type', 'application/xml');
     res.send(sitemap);
-    
   } catch (error) {
     console.error('❌ Pages sitemap error:', error);
     res.status(500).send('Error generating pages sitemap');
   }
 });
 
-// Posts Sitemap
 app.get('/sitemap-posts.xml', async (req, res) => {
   try {
     const baseUrl = process.env.BASE_URL || `https://${req.get('host')}`;
     let prompts = [];
-
     if (db) {
-      const snapshot = await db.collection('uploads')
-        .orderBy('updatedAt', 'desc')
-        .limit(1500)
-        .get();
-
+      const snapshot = await db.collection('uploads').orderBy('updatedAt', 'desc').limit(1500).get();
       prompts = snapshot.docs.map(doc => {
         const data = doc.data();
-        return {
-          id: doc.id,
-          ...data,
-          updatedAt: safeDateToString(data.updatedAt),
-          createdAt: safeDateToString(data.createdAt)
-        };
+        return { id: doc.id, ...data, updatedAt: safeDateToString(data.updatedAt), createdAt: safeDateToString(data.createdAt) };
       });
     } else {
       prompts = mockPrompts;
     }
-
     const urls = prompts.map(prompt => ({
       loc: `${baseUrl}/prompt/${prompt.id}`,
       lastmod: prompt.updatedAt && prompt.updatedAt !== prompt.createdAt ? prompt.updatedAt : prompt.createdAt,
       changefreq: 'weekly',
       priority: '0.8'
     }));
-
     const sitemap = SitemapGenerator.generateSitemap(urls);
     res.set('Content-Type', 'application/xml');
     res.send(sitemap);
-    
   } catch (error) {
     console.error('❌ Posts sitemap error:', error);
     const baseUrl = process.env.BASE_URL || `https://${req.get('host')}`;
@@ -4160,47 +3187,82 @@ app.get('/sitemap-posts.xml', async (req, res) => {
   }
 });
 
-// News Sitemap
 app.get('/sitemap-news.xml', async (req, res) => {
   try {
     const baseUrl = process.env.BASE_URL || `https://${req.get('host')}`;
     let news = [];
-
     if (db && db.collection) {
-      const snapshot = await db.collection('news')
-        .orderBy('publishedAt', 'desc')
-        .limit(500)
-        .get();
-
+      const snapshot = await db.collection('news').orderBy('publishedAt', 'desc').limit(500).get();
       news = snapshot.docs.map(doc => {
         const data = doc.data();
-        return {
-          id: doc.id,
-          ...data,
-          updatedAt: safeDateToString(data.updatedAt)
-        };
+        return { id: doc.id, ...data, updatedAt: safeDateToString(data.updatedAt) };
       });
     } else {
       news = global.mockNews;
     }
-
     const newsUrls = news.map(newsItem => ({
       loc: `${baseUrl}/news/${newsItem.id}`,
       lastmod: newsItem.updatedAt || newsItem.publishedAt || new Date().toISOString(),
       title: newsItem.title
     }));
-
     const sitemap = SitemapGenerator.generateNewsSitemap(newsUrls);
     res.set('Content-Type', 'application/xml');
     res.send(sitemap);
-    
   } catch (error) {
     console.error('❌ News sitemap error:', error);
     res.status(500).send('Error generating news sitemap');
   }
 });
 
-// ==================== UPLOAD ENDPOINT (REWRITTEN FOR R2) ====================
+app.get('/sitemap-channels.xml', async (req, res) => {
+  try {
+    const baseUrl = process.env.BASE_URL || `https://${req.get('host')}`;
+    let channels = [];
+    if (db && db.collection) {
+      const snapshot = await db.collection('channels').orderBy('updatedAt', 'desc').limit(1000).get();
+      console.log(`📊 Found ${snapshot.docs.length} channel documents`);
+      channels = snapshot.docs.map(doc => {
+        const data = doc.data();
+        return { id: doc.id, channelHandle: data.channelHandle || '', customUrl: data.customUrl || '', updatedAt: safeDateToString(data.updatedAt) };
+      }).filter(ch => ch.channelHandle && ch.channelHandle.startsWith('@'));
+      console.log(`📊 After filtering, ${channels.length} valid channels`);
+    } else {
+      const globalChannels = global.channels || {};
+      channels = Object.entries(globalChannels).map(([id, data]) => ({
+        id, channelHandle: data.channelHandle || '', customUrl: data.customUrl || '', updatedAt: data.updatedAt || new Date().toISOString()
+      })).filter(ch => ch.channelHandle && ch.channelHandle.startsWith('@'));
+    }
+    if (channels.length === 0) {
+      const emptySitemap = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>${baseUrl}/</loc><lastmod>${new Date().toISOString()}</lastmod><changefreq>daily</changefreq><priority>1.0</priority></url>
+</urlset>`;
+      res.set('Content-Type', 'application/xml');
+      return res.send(emptySitemap);
+    }
+    const urls = channels.map(ch => {
+      let loc;
+      if (ch.customUrl) loc = `${baseUrl}/channel/${ch.customUrl}`;
+      else if (ch.channelHandle) loc = `${baseUrl}/channel/${ch.channelHandle}`;
+      else loc = `${baseUrl}/channel/${ch.id}`;
+      return { loc, lastmod: ch.updatedAt || new Date().toISOString(), changefreq: 'weekly', priority: '0.8' };
+    });
+    const sitemap = SitemapGenerator.generateSitemap(urls);
+    res.set('Content-Type', 'application/xml');
+    res.send(sitemap);
+  } catch (error) {
+    console.error('❌ Channel sitemap error:', error);
+    const baseUrl = process.env.BASE_URL || `https://${req.get('host')}`;
+    const fallbackSitemap = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>${baseUrl}/</loc><lastmod>${new Date().toISOString()}</lastmod><changefreq>daily</changefreq><priority>1.0</priority></url>
+</urlset>`;
+    res.set('Content-Type', 'application/xml');
+    res.status(500).send(fallbackSitemap);
+  }
+});
+
+// ==================== UPLOAD ENDPOINT ====================
 app.post('/api/upload', async (req, res) => {
   console.log('📤 Upload request received');
   const busboy = Busboy({ headers: req.headers, limits: { fileSize: 100 * 1024 * 1024 } });
@@ -4257,13 +3319,11 @@ app.post('/api/upload', async (req, res) => {
       const isImage = mediaFileType.startsWith('image/');
       if (!isVideo && !isImage) return res.status(400).json({ error: 'File must be an image or video' });
 
-      // ===== UPLOAD TO R2 =====
       const timestamp = Date.now();
       const uniqueId = uuidv4();
       const mediaExtension = uploadedMediaFileName.split('.').pop();
       const mediaFolder = isVideo ? 'videos' : 'prompts';
       const mediaKey = `${mediaFolder}/${timestamp}-${uniqueId}.${mediaExtension}`;
-
       const mediaUrl = await uploadToR2(mediaBuffer, mediaKey, mediaFileType);
 
       let thumbnailUrl = null;
@@ -4273,12 +3333,8 @@ app.post('/api/upload', async (req, res) => {
         thumbnailUrl = await uploadToR2(thumbnailBuffer, thumbKey, thumbnailFileType);
       }
 
-      // ===== If no thumbnail, use a placeholder for videos =====
-      if (isVideo && !thumbnailUrl) {
-        thumbnailUrl = 'https://via.placeholder.com/300x400/ff6b6b/ffffff?text=Video+Reel';
-      }
+      if (isVideo && !thumbnailUrl) thumbnailUrl = 'https://via.placeholder.com/300x400/ff6b6b/ffffff?text=Video+Reel';
 
-      // ===== Save to Firestore (same as before) =====
       let category = fields.category || 'general';
       if (!fields.category) category = isVideo ? 'video' : 'general';
 
@@ -4288,51 +3344,70 @@ app.post('/api/upload', async (req, res) => {
       const slug = SEOOptimizer.generateSlug(fields.title);
 
       const detectedPlatform = AIModelManager.detectPlatform({
-        promptText: fields.promptText,
-        title: fields.title,
-        keywords: keywords,
-        category: category,
-        fileType: isVideo ? 'video' : 'image'
+        promptText: fields.promptText, title: fields.title, keywords, category, fileType: isVideo ? 'video' : 'image'
       });
 
       let price = parseFloat(fields.price) || 0;
       if (!price && fields.promptPrice) price = parseFloat(fields.promptPrice) || 0;
       const isPaid = fields.isPaid === 'true' || price > 0;
-
       const aboutDescription = fields.aboutDescription || '';
+
+      const customContent = {
+        aboutDescription: (fields.aboutDescription || '').trim(),
+        platformComparison: (fields.customPlatformComparison || '').trim(),
+        topTools: (fields.customTopTools || '').trim(),
+        modelTips: (fields.customModelTips || '').trim(),
+        howToSteps: (fields.customHowTo || '').trim(),
+        expertTips: (fields.customExpertTips || '').trim(),
+        usageTips: (fields.customUsageTips || '').trim(),
+        optimizationTips: (fields.customOptimizationTips || '').trim(),
+        createdAt: new Date().toISOString(),
+        createdBy: fields.userId || 'anonymous'
+      };
+
+      const customizeKeys = [
+        'platformComparison',
+        'topTools',
+        'modelTips',
+        'howToSteps',
+        'expertTips',
+        'usageTips',
+        'optimizationTips'
+      ];
+      const hasCustomContent = customizeKeys.some(
+        k => customContent[k] && customContent[k].length > 0
+      );
 
       const promptData = {
         title: fields.title,
         promptText: fields.promptText,
-        mediaUrl: mediaUrl,
+        mediaUrl,
         imageUrl: isImage ? mediaUrl : (thumbnailUrl || 'https://via.placeholder.com/300x400/ff6b6b/ffffff?text=Video+Reel'),
-        thumbnailUrl: thumbnailUrl,
+        thumbnailUrl,
         videoUrl: isVideo ? mediaUrl : null,
         fileType: isVideo ? 'video' : 'image',
-        category: category,
+        category,
         userName: fields.userName || 'Anonymous User',
         userId: fields.userId || 'anonymous',
-        likes: 0,
-        views: 0,
-        uses: 0,
-        copies: 0,
-        commentCount: 0,
-        keywords: keywords,
-        seoTitle: seoTitle,
-        metaDescription: metaDescription,
-        slug: slug,
+        likes: 0, views: 0, uses: 0, copies: 0, commentCount: 0,
+        keywords, seoTitle, metaDescription, slug,
         seoScore: Math.floor(Math.random() * 30) + 70,
         adsenseMigrated: true,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
-        detectedPlatform: detectedPlatform,
-        price: price,
-        isPaid: isPaid,
-        salesCount: 0,
-        totalEarnings: 0,
-        purchasedBy: [],
-        aboutDescription: aboutDescription
+        detectedPlatform,
+        price, isPaid,
+        salesCount: 0, totalEarnings: 0, purchasedBy: [],
+        aboutDescription
       };
+
+      if (hasCustomContent) {
+        promptData.customContent = customContent;
+        promptData.hasCustomContent = true;
+        console.log(`📝 Custom content attached for upload by ${fields.userId || 'anonymous'}`);
+      } else {
+        console.log(`📝 No custom content — prompt page will auto-generate all sections`);
+      }
 
       if (isVideo) {
         promptData.videoDuration = null;
@@ -4344,6 +3419,19 @@ app.post('/api/upload', async (req, res) => {
       let docRef;
       if (db && db.collection) {
         docRef = await db.collection('uploads').add(promptData);
+        const userId = fields.userId;
+        if (userId) {
+          const channelSnapshot = await db.collection('channels').where('userId', '==', userId).limit(1).get();
+          if (!channelSnapshot.empty) {
+            const channelDoc = channelSnapshot.docs[0];
+            const channelData = channelDoc.data();
+            await db.collection('channels').doc(channelDoc.id).update({
+              totalPrompts: (channelData.totalPrompts || 0) + 1,
+              updatedAt: new Date().toISOString()
+            });
+            console.log(`📊 Updated channel totalPrompts for user ${userId}`);
+          }
+        }
       } else {
         docRef = { id: 'demo-' + Date.now() };
         mockPrompts.unshift({ id: docRef.id, ...promptData });
@@ -4355,8 +3443,21 @@ app.post('/api/upload', async (req, res) => {
         upload: { id: docRef.id, ...promptData },
         message: isVideo ? `🎬 Video reel uploaded successfully${priceMessage}!` : `✅ Image uploaded successfully${priceMessage}!`,
         fileType: isVideo ? 'video' : 'image',
-        detectedPlatform: detectedPlatform
+        detectedPlatform
       });
+
+      const activity = {
+        id: uuidv4(),
+        type: 'upload',
+        promptId: docRef.id,
+        title: fields.title,
+        userName: fields.userName || 'Anonymous',
+        timestamp: new Date().toISOString()
+      };
+      if (db && db.collection) {
+        await db.collection('activity_feed').doc(activity.id).set(activity);
+        broadcastActivity(activity);
+      }
     } catch (error) {
       console.error('❌ Upload error:', error);
       res.status(500).json({ error: 'Upload failed', details: error.message });
@@ -4369,13 +3470,10 @@ app.get('/api/prompt/:id/text', async (req, res) => {
   try {
     const promptId = req.params.id;
     const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'Authentication required' });
-    }
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Authentication required' });
     const idToken = authHeader.split('Bearer ')[1];
     const decodedToken = await admin.auth().verifyIdToken(idToken);
     const userId = decodedToken.uid;
-
     let promptData;
     if (db && db.collection) {
       const doc = await db.collection('uploads').doc(promptId).get();
@@ -4385,19 +3483,11 @@ app.get('/api/prompt/:id/text', async (req, res) => {
       promptData = mockPrompts.find(p => p.id === promptId);
       if (!promptData) return res.status(404).json({ error: 'Prompt not found' });
     }
-
     const isPaid = promptData.price > 0;
     if (isPaid) {
-      const purchaseQuery = await db.collection('purchases')
-        .where('promptId', '==', promptId)
-        .where('buyerId', '==', userId)
-        .limit(1)
-        .get();
-      if (purchaseQuery.empty) {
-        return res.status(403).json({ error: 'Not purchased' });
-      }
+      const purchaseQuery = await db.collection('purchases').where('promptId', '==', promptId).where('buyerId', '==', userId).limit(1).get();
+      if (purchaseQuery.empty) return res.status(403).json({ error: 'Not purchased' });
     }
-
     res.json({ promptText: promptData.promptText });
   } catch (error) {
     console.error('Error fetching prompt text:', error);
@@ -4405,160 +3495,87 @@ app.get('/api/prompt/:id/text', async (req, res) => {
   }
 });
 
-// Get news articles
+// ==================== NEWS API ====================
 app.get('/api/news', async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const category = req.query.category;
-    
     const cacheKey = `news-${page}-${limit}-${category || 'all'}`;
     const cached = cache.get(cacheKey);
-    if (cached) {
-      return res.json(cached);
-    }
-
+    if (cached) return res.json(cached);
     let news = [];
-
     if (db && db.collection) {
-      let query = db.collection('news')
-        .orderBy('publishedAt', 'desc')
-        .limit(500);
-      
-      if (category && category !== 'all') {
-        query = query.where('category', '==', category);
-      }
-
+      let query = db.collection('news').orderBy('publishedAt', 'desc').limit(500);
+      if (category && category !== 'all') query = query.where('category', '==', category);
       const snapshot = await query.get();
-      news = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-        newsUrl: `/news/${doc.id}`
-      }));
+      news = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data(), newsUrl: `/news/${doc.id}` }));
     } else {
       news = global.mockNews;
-      
-      if (category && category !== 'all') {
-        news = news.filter(item => item.category === category);
-      }
+      if (category && category !== 'all') news = news.filter(item => item.category === category);
     }
-
     const startIndex = (page - 1) * limit;
     const endIndex = startIndex + limit;
     const paginatedNews = news.slice(startIndex, endIndex);
-
-    const result = {
-      news: paginatedNews,
-      currentPage: page,
-      totalPages: Math.ceil(news.length / limit),
-      totalCount: news.length,
-      hasMore: endIndex < news.length
-    };
-
+    const result = { news: paginatedNews, currentPage: page, totalPages: Math.ceil(news.length / limit), totalCount: news.length, hasMore: endIndex < news.length };
     cache.set(cacheKey, result, 1200);
-    
     res.json(result);
-
   } catch (error) {
     console.error('Error fetching news:', error);
     res.status(500).json({ error: 'Failed to fetch news' });
   }
 });
 
-// Individual news page
 app.get('/news/:id', async (req, res) => {
   try {
     const newsId = req.params.id;
-    
     const cacheKey = `news-${newsId}`;
     const cached = cache.get(cacheKey);
-    if (cached) {
-      return res.set('Content-Type', 'text/html').send(cached);
-    }
-
+    if (cached) return res.set('Content-Type', 'text/html').send(cached);
     let newsData;
-
     if (db && db.collection) {
       const doc = await db.collection('news').doc(newsId).get();
-      
-      if (!doc.exists) {
-        return sendNewsNotFound(res, newsId);
-      }
-
+      if (!doc.exists) return sendNewsNotFound(res, newsId);
       const news = doc.data();
       newsData = createNewsData(news, doc.id);
-      
       const shouldUpdateView = Math.random() < 0.3;
       if (shouldUpdateView) {
-        await db.collection('news').doc(newsId).update({
-          views: (news.views || 0) + 1,
-          updatedAt: new Date().toISOString()
-        });
+        await db.collection('news').doc(newsId).update({ views: (news.views || 0) + 1, updatedAt: new Date().toISOString() });
       }
     } else {
       const mockNews = global.mockNews.find(n => n.id === newsId) || global.mockNews[0];
       newsData = createNewsData(mockNews, newsId);
     }
-
     const html = generateNewsHTML(newsData);
-    
     cache.set(cacheKey, html, 1200);
-    
     res.set('Content-Type', 'text/html');
     res.send(html);
-
   } catch (error) {
     console.error('❌ Error serving news page:', error);
     sendNewsErrorPage(res, error);
   }
 });
 
-// COMMENT SYSTEM API ENDPOINTS - MOCK ONLY, NO FIRESTORE
-
-// Get comments for a prompt (mock)
+// ==================== COMMENT SYSTEM (mock) ====================
 app.get('/api/prompt/:id/comments', async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
-    
-    // Return mock empty comments - no Firestore
-    res.json({
-      comments: [],
-      currentPage: page,
-      totalPages: 0,
-      totalCount: 0,
-      hasMore: false
-    });
+    res.json({ comments: [], currentPage: page, totalPages: 0, totalCount: 0, hasMore: false });
   } catch (error) {
     console.error('Error fetching comments:', error);
     res.status(500).json({ error: 'Failed to fetch comments' });
   }
 });
 
-// Post a new comment (mock only)
 app.post('/api/prompt/:id/comments', async (req, res) => {
   try {
     const { content, authorName, authorEmail } = req.body;
-    
-    if (!content || !content.trim()) {
-      return res.status(400).json({ error: 'Comment content is required' });
-    }
-    
-    if (content.length > 1000) {
-      return res.status(400).json({ error: 'Comment is too long (max 1000 characters)' });
-    }
-    
-    // Mock response - no database
+    if (!content || !content.trim()) return res.status(400).json({ error: 'Comment content is required' });
+    if (content.length > 1000) return res.status(400).json({ error: 'Comment is too long (max 1000 characters)' });
     res.json({
       success: true,
-      comment: {
-        id: 'mock-comment-' + Date.now(),
-        content: content.trim(),
-        authorName: authorName?.trim() || 'Anonymous',
-        authorEmail: authorEmail?.trim() || null,
-        createdAt: new Date().toISOString(),
-        likes: 0
-      },
+      comment: { id: 'mock-comment-' + Date.now(), content: content.trim(), authorName: authorName?.trim() || 'Anonymous', authorEmail: authorEmail?.trim() || null, createdAt: new Date().toISOString(), likes: 0 },
       message: 'Comment posted successfully (mock)'
     });
   } catch (error) {
@@ -4567,10 +3584,8 @@ app.post('/api/prompt/:id/comments', async (req, res) => {
   }
 });
 
-// Like a comment (mock only)
 app.post('/api/comment/:commentId/like', async (req, res) => {
   try {
-    // Mock response - no database
     res.json({ success: true, message: 'Comment liked (mock)' });
   } catch (error) {
     console.error('Error liking comment:', error);
@@ -4578,63 +3593,32 @@ app.post('/api/comment/:commentId/like', async (req, res) => {
   }
 });
 
-// Engagement API Endpoints - MOCK ONLY, NO FIRESTORE
+// ==================== ENGAGEMENT (mock) ====================
+app.post('/api/prompt/:id/view', async (req, res) => { res.json({ success: true, message: 'View counted (mock)' }); });
+app.post('/api/prompt/:id/like', async (req, res) => { const { action } = req.body; res.json({ success: true, action }); });
+app.post('/api/prompt/:id/use', async (req, res) => { res.json({ success: true, message: 'Use counted (mock)' }); });
+app.post('/api/prompt/:id/copy', async (req, res) => { res.json({ success: true, message: 'Copy tracked (mock)' }); });
+app.get('/api/prompt/:id/user-engagement', async (req, res) => { res.json({ userLiked: false, userUsed: false, userCopied: false }); });
 
-// Track view count (mock)
-app.post('/api/prompt/:id/view', async (req, res) => {
-  res.json({ success: true, message: 'View counted (mock)' });
-});
-
-// Like/Unlike prompt (mock)
-app.post('/api/prompt/:id/like', async (req, res) => {
-  const { action } = req.body;
-  res.json({ success: true, action });
-});
-
-// Track prompt use (mock)
-app.post('/api/prompt/:id/use', async (req, res) => {
-  res.json({ success: true, message: 'Use counted (mock)' });
-});
-
-// Track prompt copy actions (mock)
-app.post('/api/prompt/:id/copy', async (req, res) => {
-  res.json({ success: true, message: 'Copy tracked (mock)' });
-});
-
-// Get user engagement status (mock)
-app.get('/api/prompt/:id/user-engagement', async (req, res) => {
-  res.json({ userLiked: false, userUsed: false, userCopied: false });
-});
-
-// Engagement Analytics API Endpoint (mock)
 app.get('/api/prompt/:id/engagement', async (req, res) => {
   const engagement = await EngagementAnalytics.getPromptEngagement(req.params.id, db);
   res.json(engagement);
 });
 
-// Search API endpoint
+// ==================== SEARCH ====================
 app.get('/api/search', async (req, res) => {
   try {
     const { q: query, category, sort, page = 1, limit = 12 } = req.query;
-    
     const cacheKey = `search-${query || 'all'}-${category || 'all'}-${page}-${limit}`;
     const cached = cache.get(cacheKey);
-    if (cached) {
-      return res.json(cached);
-    }
-    
+    if (cached) return res.json(cached);
     let prompts = [];
-
     if (db && db.collection) {
-      const snapshot = await db.collection('uploads')
-        .limit(500)
-        .get();
-      
+      const snapshot = await db.collection('uploads').limit(500).get();
       prompts = snapshot.docs.map(doc => {
         const data = doc.data();
         return {
-          id: doc.id,
-          ...data,
+          id: doc.id, ...data,
           createdAt: safeDateToString(data.createdAt),
           promptUrl: `/prompt/${doc.id}`,
           fileType: data.fileType || 'image',
@@ -4644,78 +3628,48 @@ app.get('/api/search', async (req, res) => {
         };
       }).filter(prompt => {
         if (!query) return true;
-        
         const searchTerm = query.toLowerCase();
         const title = (prompt.title || '').toLowerCase();
         const promptText = (prompt.promptText || '').toLowerCase();
         const keywords = prompt.keywords || [];
-        
-        return title.includes(searchTerm) ||
-               promptText.includes(searchTerm) ||
-               keywords.some(keyword => 
-                 keyword.toLowerCase().includes(searchTerm)
-               );
+        return title.includes(searchTerm) || promptText.includes(searchTerm) || keywords.some(keyword => keyword.toLowerCase().includes(searchTerm));
       });
     } else {
       prompts = mockPrompts.filter(prompt => {
         let matches = true;
-        
         if (query) {
           const searchTerm = query.toLowerCase();
           const title = (prompt.title || '').toLowerCase();
           const promptText = (prompt.promptText || '').toLowerCase();
           const keywords = prompt.keywords || [];
-          
-          matches = matches && (
-            title.includes(searchTerm) ||
-            promptText.includes(searchTerm) ||
-            keywords.some(keyword => keyword.toLowerCase().includes(searchTerm))
-          );
+          matches = matches && (title.includes(searchTerm) || promptText.includes(searchTerm) || keywords.some(keyword => keyword.toLowerCase().includes(searchTerm)));
         }
-        
-        if (category && category !== 'all') {
-          matches = matches && prompt.category === category;
-        }
-        
+        if (category && category !== 'all') matches = matches && prompt.category === category;
         return matches;
       });
     }
-    
     prompts = sortPrompts(prompts, sort);
-    
     const startIndex = (page - 1) * limit;
     const endIndex = startIndex + limit;
     const paginatedPrompts = prompts.slice(startIndex, endIndex);
-    
     const result = {
       prompts: paginatedPrompts,
       totalCount: prompts.length,
       currentPage: parseInt(page),
       totalPages: Math.ceil(prompts.length / limit),
       hasMore: endIndex < prompts.length,
-      counts: {
-        images: prompts.filter(p => !p.isVideo && p.fileType !== 'video').length,
-        videos: prompts.filter(p => p.isVideo || p.fileType === 'video').length
-      }
+      counts: { images: prompts.filter(p => !p.isVideo && p.fileType !== 'video').length, videos: prompts.filter(p => p.isVideo || p.fileType === 'video').length }
     };
-    
     cache.set(cacheKey, result, 1200);
-    
     res.json(result);
-    
   } catch (error) {
     console.error('Search error:', error);
-    res.status(500).json({ 
-      error: 'Search failed', 
-      details: error.message 
-    });
+    res.status(500).json({ error: 'Search failed', details: error.message });
   }
 });
 
-// Helper function for sorting
 function sortPrompts(prompts, sortBy) {
   const sorted = [...prompts];
-  
   switch (sortBy) {
     case 'popular':
       return sorted.sort((a, b) => {
@@ -4723,14 +3677,10 @@ function sortPrompts(prompts, sortBy) {
         const bScore = (b.likes || 0) + (b.views || 0) + (b.copies || 0) + (b.commentCount || 0);
         return bScore - aScore;
       });
-    case 'likes':
-      return sorted.sort((a, b) => (b.likes || 0) - (a.likes || 0));
-    case 'views':
-      return sorted.sort((a, b) => (b.views || 0) - (a.views || 0));
-    case 'copies':
-      return sorted.sort((a, b) => (b.copies || 0) - (a.copies || 0));
-    case 'comments':
-      return sorted.sort((a, b) => (b.commentCount || 0) - (a.commentCount || 0));
+    case 'likes': return sorted.sort((a, b) => (b.likes || 0) - (a.likes || 0));
+    case 'views': return sorted.sort((a, b) => (b.views || 0) - (a.views || 0));
+    case 'copies': return sorted.sort((a, b) => (b.copies || 0) - (a.copies || 0));
+    case 'comments': return sorted.sort((a, b) => (b.commentCount || 0) - (a.commentCount || 0));
     case 'recent':
     default:
       return sorted.sort((a, b) => {
@@ -4741,42 +3691,29 @@ function sortPrompts(prompts, sortBy) {
   }
 }
 
-// API Routes - Get uploads with caching and limits
+// ==================== UPLOADS LIST ====================
 app.get('/api/uploads', async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 12;
     const type = req.query.type;
-    
     const cacheKey = `uploads-page-${page}-limit-${limit}-type-${type || 'all'}`;
     const cached = cache.get(cacheKey);
-    if (cached) {
-      return res.json(cached);
-    }
-    
+    if (cached) return res.json(cached);
     let allUploads = [];
-
     if (db && db.collection) {
-      const snapshot = await db.collection('uploads')
-        .orderBy('createdAt', 'desc')
-        .limit(500)
-        .get();
-
+      const snapshot = await db.collection('uploads').orderBy('createdAt', 'desc').limit(500).get();
       allUploads = [];
       snapshot.forEach(doc => {
         const data = doc.data();
-        allUploads.push({ 
-          id: doc.id, 
-          ...data,
+        allUploads.push({
+          id: doc.id, ...data,
           createdAt: safeDateToString(data.createdAt),
           updatedAt: safeDateToString(data.updatedAt),
-          userLiked: false,
-          userUsed: false,
-          userCopied: false,
+          userLiked: false, userUsed: false, userCopied: false,
           promptUrl: `/prompt/${doc.id}`,
-          imageUrl: data.thumbnailUrl || data.imageUrl || data.mediaUrl || 
-                   (data.fileType === 'video' ? 'https://via.placeholder.com/300x400/ff6b6b/ffffff?text=Video+Reel' : 
-                    'https://via.placeholder.com/800x400/4e54c8/ffffff?text=AI+Image'),
+          imageUrl: data.thumbnailUrl || data.imageUrl || data.mediaUrl ||
+                   (data.fileType === 'video' ? 'https://via.placeholder.com/300x400/ff6b6b/ffffff?text=Video+Reel' : 'https://via.placeholder.com/800x400/4e54c8/ffffff?text=AI+Image'),
           fileType: data.fileType || 'image',
           isVideo: data.fileType === 'video' || data.videoUrl || data.category === 'video',
           price: data.price || 0,
@@ -4786,28 +3723,20 @@ app.get('/api/uploads', async (req, res) => {
     } else {
       allUploads = mockPrompts.map(prompt => ({
         ...prompt,
-        userLiked: false,
-        userUsed: false,
-        userCopied: false,
+        userLiked: false, userUsed: false, userCopied: false,
         promptUrl: `/prompt/${prompt.id}`,
-        imageUrl: prompt.thumbnailUrl || prompt.imageUrl || prompt.mediaUrl || 
-                 (prompt.fileType === 'video' ? 'https://via.placeholder.com/300x400/ff6b6b/ffffff?text=Video+Reel' : 
-                  'https://via.placeholder.com/800x400/4e54c8/ffffff?text=AI+Image'),
+        imageUrl: prompt.thumbnailUrl || prompt.imageUrl || prompt.mediaUrl ||
+                 (prompt.fileType === 'video' ? 'https://via.placeholder.com/300x400/ff6b6b/ffffff?text=Video+Reel' : 'https://via.placeholder.com/800x400/4e54c8/ffffff?text=AI+Image'),
         fileType: prompt.fileType || 'image',
         isVideo: prompt.fileType === 'video' || prompt.category === 'video',
         price: prompt.price || 0,
         isPaid: prompt.price > 0
       }));
     }
-
-    if (type && type !== 'all') {
-      allUploads = allUploads.filter(upload => upload.fileType === type);
-    }
-
+    if (type && type !== 'all') allUploads = allUploads.filter(upload => upload.fileType === type);
     const startIndex = (page - 1) * limit;
     const endIndex = startIndex + limit;
     const uploads = allUploads.slice(startIndex, endIndex);
-
     const result = {
       uploads,
       currentPage: page,
@@ -4829,118 +3758,80 @@ app.get('/api/uploads', async (req, res) => {
         total: AIModelManager.getPhotoModelCount() + AIModelManager.getVideoModelCount()
       }
     };
-
     cache.set(cacheKey, result, 1200);
-    
     res.json(result);
   } catch (error) {
     console.error('Error fetching uploads:', error);
     const result = {
       uploads: mockPrompts.slice(0, 12).map(prompt => ({
         ...prompt,
-        userLiked: false,
-        userUsed: false,
-        userCopied: false,
+        userLiked: false, userUsed: false, userCopied: false,
         promptUrl: `/prompt/${prompt.id}`,
-        imageUrl: prompt.thumbnailUrl || prompt.imageUrl || prompt.mediaUrl || 
-                 (prompt.fileType === 'video' ? 'https://via.placeholder.com/300x400/ff6b6b/ffffff?text=Video+Reel' : 
-                  'https://via.placeholder.com/800x400/4e54c8/ffffff?text=AI+Image'),
+        imageUrl: prompt.thumbnailUrl || prompt.imageUrl || prompt.mediaUrl ||
+                 (prompt.fileType === 'video' ? 'https://via.placeholder.com/300x400/ff6b6b/ffffff?text=Video+Reel' : 'https://via.placeholder.com/800x400/4e54c8/ffffff?text=AI+Image'),
         fileType: prompt.fileType || 'image',
         isVideo: prompt.fileType === 'video' || prompt.category === 'video',
         price: prompt.price || 0,
         isPaid: prompt.price > 0
       })),
-      currentPage: 1,
-      totalPages: 1,
-      totalCount: mockPrompts.length,
-      typeBreakdown: {
-        images: mockPrompts.filter(u => u.fileType === 'image' || !u.fileType || u.fileType !== 'video').length,
-        videos: mockPrompts.filter(u => u.fileType === 'video' || u.category === 'video').length,
-        videosWithThumbnails: mockPrompts.filter(u => (u.fileType === 'video' || u.category === 'video') && u.hasCustomThumbnail).length
-      },
-      adsenseInfo: {
-        migrated: mockPrompts.length,
-        total: mockPrompts.length,
-        percentage: 100
-      },
-      aiModels: {
-        photo: AIModelManager.getPhotoModelCount(),
-        video: AIModelManager.getVideoModelCount(),
-        total: AIModelManager.getPhotoModelCount() + AIModelManager.getVideoModelCount()
-      }
+      currentPage: 1, totalPages: 1, totalCount: mockPrompts.length,
+      typeBreakdown: { images: mockPrompts.filter(u => u.fileType === 'image' || !u.fileType || u.fileType !== 'video').length, videos: mockPrompts.filter(u => u.fileType === 'video' || u.category === 'video').length, videosWithThumbnails: mockPrompts.filter(u => (u.fileType === 'video' || u.category === 'video') && u.hasCustomThumbnail).length },
+      adsenseInfo: { migrated: mockPrompts.length, total: mockPrompts.length, percentage: 100 },
+      aiModels: { photo: AIModelManager.getPhotoModelCount(), video: AIModelManager.getVideoModelCount(), total: AIModelManager.getPhotoModelCount() + AIModelManager.getVideoModelCount() }
     };
-    
     res.json(result);
   }
 });
 
-// API endpoint to get list of blog posts
+// ==================== CHANNEL HANDLE CHECK ====================
+app.get('/api/check-handle/:handle', async (req, res) => {
+  try {
+    const handle = req.params.handle;
+    let exists = false;
+    if (db && db.collection) {
+      const snapshot = await db.collection('channels').where('channelHandle', '==', `@${handle}`).limit(1).get();
+      if (!snapshot.empty) exists = true;
+    }
+    res.json({ exists });
+  } catch (error) {
+    console.error('Handle check error:', error);
+    res.status(500).json({ error: 'Failed to check handle' });
+  }
+});
+
+// ==================== BLOG POSTS API ====================
 app.get('/api/blog-posts', (req, res) => {
     const blogDir = path.join(__dirname, 'blog');
-    
-    if (!fs.existsSync(blogDir)) {
-        return res.json({ posts: [] });
-    }
-    
+    if (!fs.existsSync(blogDir)) return res.json({ posts: [] });
     try {
         const files = fs.readdirSync(blogDir);
         const htmlFiles = files.filter(file => file.endsWith('.html'));
-        
         const posts = htmlFiles.map(filename => {
             const filePath = path.join(blogDir, filename);
             const stats = fs.statSync(filePath);
             const content = fs.readFileSync(filePath, 'utf8');
-            
             const titleMatch = content.match(/<title>(.*?)<\/title>/);
             const title = titleMatch ? titleMatch[1] : filename.replace('.html', '');
-            
             const descMatch = content.match(/<meta name="description" content="(.*?)">/);
             const description = descMatch ? descMatch[1] : 'No description available';
-            
             const dateMatch = content.match(/<meta name="date" content="(.*?)">/);
             const date = dateMatch ? dateMatch[1] : stats.birthtime.toISOString().split('T')[0];
-            
             const authorMatch = content.match(/<meta name="author" content="(.*?)">/);
             const author = authorMatch ? authorMatch[1] : 'Tools Prompt';
-            
             const categoryMatch = content.match(/<meta name="category" content="(.*?)">/);
             const category = categoryMatch ? categoryMatch[1] : 'General';
-            
             const excerptMatch = content.match(/<p>(.*?)<\/p>/);
             const excerpt = excerptMatch ? excerptMatch[1] : description;
-            
-            return {
-                filename,
-                title,
-                description,
-                excerpt,
-                date,
-                author,
-                category,
-                url: `/blog/${filename}`,
-                modified: stats.mtime
-            };
+            return { filename, title, description, excerpt, date, author, category, url: `/blog/${filename}`, modified: stats.mtime };
         });
-        
         posts.sort((a, b) => new Date(b.date) - new Date(a.date));
-        
-        res.json({ 
-            success: true, 
-            posts,
-            count: posts.length
-        });
-        
+        res.json({ success: true, posts, count: posts.length });
     } catch (error) {
         console.error('Error reading blog directory:', error);
-        res.status(500).json({ 
-            success: false, 
-            error: 'Failed to read blog posts',
-            posts: [] 
-        });
+        res.status(500).json({ success: false, error: 'Failed to read blog posts', posts: [] });
     }
 });
 
-// Serve individual blog posts
 app.use('/blog', express.static(path.join(__dirname, 'blog')));
 
 // ==================== INDIVIDUAL PROMPT PAGE ====================
@@ -4954,41 +3845,21 @@ app.get('/prompt/:id', async (req, res) => {
     let promptData;
     let hasPurchased = false;
 
-    const authHeader = req.headers.authorization;
-    let user = null;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      const idToken = authHeader.split('Bearer ')[1];
-      try {
-        user = await admin.auth().verifyIdToken(idToken);
-      } catch (err) {
-        console.log('Auth token invalid, proceeding as guest');
-      }
-    }
-
     if (db && db.collection && promptId !== 'demo-1' && promptId !== 'demo-2' && promptId !== 'demo-3' && promptId !== 'demo-video-1') {
       const doc = await db.collection('uploads').doc(promptId).get();
       if (!doc.exists) return sendPromptNotFound(res, promptId);
       const prompt = doc.data();
-      if (user) {
-        const purchaseQuery = await db.collection('purchases')
-          .where('promptId', '==', promptId)
-          .where('buyerId', '==', user.uid)
-          .limit(1)
-          .get();
-        hasPurchased = !purchaseQuery.empty;
-      }
       promptData = createPromptData(prompt, doc.id, hasPurchased);
     } else {
       const mockPrompt = mockPrompts.find(p => p.id === promptId) || mockPrompts[0];
-      hasPurchased = false;
       promptData = createPromptData(mockPrompt, promptId, hasPurchased);
     }
 
-    // ===== GET AFFILIATES FOR THIS PROMPT'S CREATOR =====
     const creatorId = promptData.userId;
     const affiliates = await getAffiliatesByUser(creatorId, 3);
+    const creatorChannel = await getChannelByUserId(creatorId);
 
-    const html = generateEnhancedPromptHTML(promptData, affiliates);
+    const html = generateEnhancedPromptHTML(promptData, affiliates, creatorChannel);
     cache.set(cacheKey, html, 1200);
     res.set('Content-Type', 'text/html');
     res.send(html);
@@ -4998,54 +3869,169 @@ app.get('/prompt/:id', async (req, res) => {
   }
 });
 
-// Category pages for SEO
+// ==================== EDIT PROMPT CONTENT (OWNER ONLY) ====================
+app.post('/api/prompt/:id/update-content', async (req, res) => {
+  try {
+    const promptId = req.params.id;
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const idToken = authHeader.split('Bearer ')[1];
+    let userId;
+    try {
+      const decodedToken = await admin.auth().verifyIdToken(idToken);
+      userId = decodedToken.uid;
+    } catch (e) {
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+
+    const busboy = Busboy({ headers: req.headers, limits: { fileSize: 10 * 1024 * 1024 } });
+    const fields = {};
+    let imageBuffer = null;
+    let imageMimeType = null;
+    let uploadError = null;
+
+    busboy.on('field', (fieldname, val) => { fields[fieldname] = val; });
+
+    busboy.on('file', (fieldname, file, info) => {
+      if (fieldname === 'image') {
+        const allowed = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+        if (!allowed.includes(info.mimeType)) {
+          uploadError = 'Invalid image type. Allowed: JPEG, PNG, WebP';
+          file.resume();
+          return;
+        }
+        imageMimeType = info.mimeType;
+        const chunks = [];
+        file.on('data', c => chunks.push(c));
+        file.on('end', () => {
+          imageBuffer = Buffer.concat(chunks);
+          if (imageBuffer.length > 5 * 1024 * 1024) {
+            uploadError = 'Image size exceeds 5MB';
+          }
+        });
+      } else {
+        file.resume();
+      }
+    });
+
+    busboy.on('finish', async () => {
+      try {
+        if (uploadError) return res.status(400).json({ error: uploadError });
+
+        let promptData;
+        if (db && db.collection) {
+          const doc = await db.collection('uploads').doc(promptId).get();
+          if (!doc.exists) return res.status(404).json({ error: 'Prompt not found' });
+          promptData = doc.data();
+          if (promptData.userId !== userId) {
+            return res.status(403).json({ error: 'You can only edit your own prompts' });
+          }
+        } else {
+          promptData = mockPrompts.find(p => p.id === promptId);
+          if (!promptData) return res.status(404).json({ error: 'Prompt not found' });
+        }
+
+        let newImageUrl = null;
+        if (imageBuffer && imageMimeType) {
+          const timestamp = Date.now();
+          const uniqueId = uuidv4();
+          const ext = imageMimeType.split('/')[1] || 'jpg';
+          const key = `prompt_edits/${promptId}-${timestamp}-${uniqueId}.${ext}`;
+          newImageUrl = await uploadToR2(imageBuffer, key, imageMimeType);
+          console.log(`✅ Prompt image updated: ${newImageUrl}`);
+        }
+
+        const customContent = {
+          aboutDescription: (fields.aboutDescription || '').trim(),
+          platformComparison: (fields.platformComparison || '').trim(),
+          topTools: (fields.topTools || '').trim(),
+          modelTips: (fields.modelTips || '').trim(),
+          howToSteps: (fields.howToSteps || '').trim(),
+          expertTips: (fields.expertTips || '').trim(),
+          usageTips: (fields.usageTips || '').trim(),
+          optimizationTips: (fields.optimizationTips || '').trim(),
+          updatedAt: new Date().toISOString(),
+          updatedBy: userId
+        };
+
+      const updateData = {
+  customContent,
+  updatedAt: new Date().toISOString()
+};
+if (fields.aboutDescription !== undefined) {
+  updateData.aboutDescription = (fields.aboutDescription || '').trim();
+}
+
+        if (newImageUrl) {
+          updateData.imageUrl = newImageUrl;
+          if (!promptData.videoUrl) updateData.thumbnailUrl = newImageUrl;
+        }
+
+        if (db && db.collection) {
+          await db.collection('uploads').doc(promptId).update(sanitizeFirestoreData(updateData));
+        } else {
+          Object.assign(promptData, updateData);
+        }
+
+        cache.del(`prompt-${promptId}`);
+        cache.del(`uploads-page-1`);
+
+        res.json({
+          success: true,
+          message: 'Prompt updated successfully',
+          newImageUrl: newImageUrl || undefined
+        });
+
+      } catch (e) {
+        console.error('Update prompt error:', e);
+        res.status(500).json({ error: e.message || 'Failed to update prompt' });
+      }
+    });
+
+    busboy.on('error', (err) => {
+      console.error('Busboy error:', err);
+      res.status(500).json({ error: 'Request parsing error' });
+    });
+
+    req.pipe(busboy);
+  } catch (error) {
+    console.error('Update prompt error:', error);
+    res.status(500).json({ error: 'Failed to update prompt' });
+  }
+});
+
+// ==================== CATEGORY PAGE ====================
 app.get('/category/:category', async (req, res) => {
   try {
     const category = req.params.category;
     const baseUrl = process.env.BASE_URL || `https://${req.get('host')}`;
-    
     const cacheKey = `category-${category}`;
     const cached = cache.get(cacheKey);
-    if (cached) {
-      return res.set('Content-Type', 'text/html').send(cached);
-    }
-    
+    if (cached) return res.set('Content-Type', 'text/html').send(cached);
     const html = generateCategoryHTML(category, baseUrl);
-    
     cache.set(cacheKey, html, 1200);
-    
     res.set('Content-Type', 'text/html');
     res.send(html);
-
   } catch (error) {
     console.error('❌ Error serving category page:', error);
     sendErrorPage(res, error);
   }
 });
 
-// AI Models API Endpoint
+// ==================== AI MODELS API ====================
 app.get('/api/ai-models', (req, res) => {
   try {
     const type = req.query.type;
-    
     let response = {
       success: true,
-      counts: {
-        photo: AIModelManager.getPhotoModelCount(),
-        video: AIModelManager.getVideoModelCount(),
-        total: AIModelManager.getPhotoModelCount() + AIModelManager.getVideoModelCount()
-      }
+      counts: { photo: AIModelManager.getPhotoModelCount(), video: AIModelManager.getVideoModelCount(), total: AIModelManager.getPhotoModelCount() + AIModelManager.getVideoModelCount() }
     };
-    
-    if (type === 'photo') {
-      response.models = AIModelManager.getAllPhotoModels();
-    } else if (type === 'video') {
-      response.models = AIModelManager.getAllVideoModels();
-    } else {
-      response.photoModels = AIModelManager.getAllPhotoModels();
-      response.videoModels = AIModelManager.getAllVideoModels();
-    }
-    
+    if (type === 'photo') response.models = AIModelManager.getAllPhotoModels();
+    else if (type === 'video') response.models = AIModelManager.getAllVideoModels();
+    else { response.photoModels = AIModelManager.getAllPhotoModels(); response.videoModels = AIModelManager.getAllVideoModels(); }
     res.json(response);
   } catch (error) {
     console.error('Error fetching AI models:', error);
@@ -5053,31 +4039,15 @@ app.get('/api/ai-models', (req, res) => {
   }
 });
 
-// AI Model Info API Endpoint
 app.get('/api/ai-model/:modelId', (req, res) => {
   try {
     const modelId = req.params.modelId;
     const type = req.query.type || 'auto';
-    
     let modelInfo = null;
-    
-    if (type === 'photo' || type === 'auto') {
-      modelInfo = AIModelManager.getPhotoModelInfo(modelId);
-    }
-    
-    if (!modelInfo && (type === 'video' || type === 'auto')) {
-      modelInfo = AIModelManager.getVideoModelInfo(modelId);
-    }
-    
-    if (modelInfo) {
-      res.json({
-        success: true,
-        model: modelInfo,
-        id: modelId
-      });
-    } else {
-      res.status(404).json({ error: 'Model not found' });
-    }
+    if (type === 'photo' || type === 'auto') modelInfo = AIModelManager.getPhotoModelInfo(modelId);
+    if (!modelInfo && (type === 'video' || type === 'auto')) modelInfo = AIModelManager.getVideoModelInfo(modelId);
+    if (modelInfo) res.json({ success: true, model: modelInfo, id: modelId });
+    else res.status(404).json({ error: 'Model not found' });
   } catch (error) {
     console.error('Error fetching AI model:', error);
     res.status(500).json({ error: 'Failed to fetch AI model' });
@@ -5085,8 +4055,6 @@ app.get('/api/ai-model/:modelId', (req, res) => {
 });
 
 // ==================== CREDITS & AI GENERATION ====================
-
-// Get user credits
 app.get('/api/credits/:userId', async (req, res) => {
   try {
     const userId = req.params.userId;
@@ -5099,179 +4067,476 @@ app.get('/api/credits/:userId', async (req, res) => {
 });
 
 app.post('/api/generate-image', async (req, res) => {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'Authentication required' });
-    }
+  let userId = null;
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
     const idToken = authHeader.split('Bearer ')[1];
-    const decodedToken = await admin.auth().verifyIdToken(idToken);
-    const userId = decodedToken.uid;
+    try {
+      const decodedToken = await admin.auth().verifyIdToken(idToken);
+      userId = decodedToken.uid;
+    } catch (err) {
+      console.log('Auth token invalid, proceeding as guest');
+    }
+  }
 
+  if (userId) {
     const creditInfo = await getUserCredits(userId);
-    if (creditInfo.credits <= 0) {
-      return res.status(403).json({ error: 'Insufficient credits. Please upgrade.' });
+    if (creditInfo.credits <= 0) return res.status(403).json({ error: 'Insufficient credits. Please upgrade.' });
+  } else {
+    const guestCheck = checkAndIncrementGuest(req, false);
+    if (!guestCheck.allowed) return res.status(403).json({ error: 'guest_limit_reached', remaining: 0 });
+  }
+
+  const busboy = Busboy({ headers: req.headers, limits: { fileSize: 10 * 1024 * 1024 } });
+  let prompt = '';
+  let imageBuffer = null, imageMimeType = null, imageFileName = null;
+
+  busboy.on('field', (fieldname, val) => { if (fieldname === 'prompt') prompt = val; });
+  busboy.on('file', (fieldname, file, info) => {
+    if (fieldname === 'image') {
+      imageFileName = info.filename;
+      imageMimeType = info.mimeType;
+      const chunks = [];
+      file.on('data', (data) => chunks.push(data));
+      file.on('end', () => { imageBuffer = Buffer.concat(chunks); });
+    } else file.resume();
+  });
+
+  busboy.on('finish', async () => {
+    try {
+      let finalPrompt = prompt.trim();
+      if (!finalPrompt) return res.status(400).json({ error: 'Prompt is required' });
+
+      let imageUrl = null;
+      if (imageBuffer) {
+        const timestamp = Date.now();
+        const uniqueId = uuidv4();
+        const ext = imageFileName ? imageFileName.split('.').pop() : 'jpg';
+        const key = `agnes_images/${timestamp}-${uniqueId}.${ext}`;
+        imageUrl = await uploadToR2(imageBuffer, key, imageMimeType);
+      }
+
+      const payload = { model: 'agnes-image-2.1-flash', prompt: finalPrompt, size: '1K', ratio: '1:1' };
+      if (imageUrl) payload.image = [imageUrl];
+
+      let agnesResponse = null;
+      let attempts = 0;
+      const maxAttempts = 3;
+      let lastError = null;
+
+      while (attempts < maxAttempts) {
+        attempts++;
+        try {
+          agnesResponse = await axios.post('https://apihub.agnes-ai.com/v1/images/generations', payload, {
+            headers: { 'Authorization': `Bearer ${process.env.AGNES_API_KEY}`, 'Content-Type': 'application/json' },
+            timeout: 120000
+          });
+          break;
+        } catch (err) {
+          lastError = err;
+          console.warn(`Agnes API attempt ${attempts} failed:`, err.message);
+          if (attempts < maxAttempts) {
+            const delay = Math.min(2000 * Math.pow(2, attempts - 1), 10000);
+            await new Promise(resolve => setTimeout(resolve, delay));
+          }
+        }
+      }
+
+      if (!agnesResponse) throw lastError || new Error('Agnes API failed after retries');
+
+      let imageUrlFinal = null;
+      if (agnesResponse.data.data && Array.isArray(agnesResponse.data.data)) {
+        const firstImage = agnesResponse.data.data[0];
+        if (firstImage.url) imageUrlFinal = firstImage.url;
+        else if (firstImage.b64_json) imageUrlFinal = `data:image/png;base64,${firstImage.b64_json}`;
+      }
+
+      if (!imageUrlFinal) throw new Error('No image data in Agnes response');
+
+      if (imageUrlFinal.startsWith('http')) {
+        const imgRes = await fetch(imageUrlFinal);
+        const buffer = await imgRes.arrayBuffer();
+        const mime = imgRes.headers.get('content-type') || 'image/png';
+        imageUrlFinal = `data:${mime};base64,${Buffer.from(buffer).toString('base64')}`;
+      }
+
+      let publicImageUrl = imageUrlFinal;
+      if (imageUrlFinal && imageUrlFinal.startsWith('data:')) {
+        try {
+          const matches = imageUrlFinal.match(/^data:([A-Za-z-+/]+);base64,(.+)$/);
+          if (matches && matches.length === 3) {
+            const mimeType = matches[1];
+            const base64Data = matches[2];
+            const buffer = Buffer.from(base64Data, 'base64');
+            publicImageUrl = await uploadGeneratedImageToR2(buffer, mimeType);
+            console.log('✅ Generated image uploaded to R2:', publicImageUrl);
+          }
+        } catch (uploadErr) {
+          console.warn('⚠️ R2 upload failed, using data URL:', uploadErr.message);
+        }
+      }
+
+      if (userId) {
+        await deductCredit(userId);
+        const remainingCredits = (await getUserCredits(userId)).credits;
+        res.json({ success: true, imageUrl: publicImageUrl, remainingCredits, prompt: finalPrompt, modelUsed: 'Agnes Image 2.1 Flash' });
+      } else {
+        checkAndIncrementGuest(req, true);
+        const guestCheck = checkAndIncrementGuest(req, false);
+        res.json({ success: true, imageUrl: publicImageUrl, remainingCredits: guestCheck.remaining, prompt: finalPrompt, modelUsed: 'Agnes Image 2.1 Flash', isGuest: true });
+      }
+    } catch (error) {
+      console.error('Agnes image error:', error.response?.data || error.message);
+      try {
+        const pollinationsUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(finalPrompt)}?width=1024&height=1024&model=flux&nologo=true`;
+        const fallbackRes = await axios.get(pollinationsUrl, { responseType: 'arraybuffer', timeout: 30000 });
+        const base64 = Buffer.from(fallbackRes.data, 'binary').toString('base64');
+        const mime = fallbackRes.headers['content-type'] || 'image/png';
+        const fallbackUrl = `data:${mime};base64,${base64}`;
+        if (userId) {
+          await deductCredit(userId);
+          res.json({ success: true, imageUrl: fallbackUrl, remainingCredits: (await getUserCredits(userId)).credits, prompt: finalPrompt, modelUsed: 'Pollinations (fallback)' });
+        } else {
+          checkAndIncrementGuest(req, true);
+          const guestCheck = checkAndIncrementGuest(req, false);
+          res.json({ success: true, imageUrl: fallbackUrl, remainingCredits: guestCheck.remaining, prompt: finalPrompt, modelUsed: 'Pollinations (fallback)', isGuest: true });
+        }
+      } catch (fallbackError) {
+        res.status(500).json({ error: 'All generation methods failed' });
+      }
+    }
+  });
+
+  req.pipe(busboy);
+});
+
+// ==================== AGNES AI VIDEO GENERATION ====================
+app.post('/api/generate-agnes-video', async (req, res) => {
+    if (!AGNES_API_KEY) {
+        console.error('Agnes API Key is not configured.');
+        return res.status(500).json({ error: 'Server configuration error: Agnes API Key missing.' });
     }
 
-    const busboy = Busboy({ headers: req.headers, limits: { fileSize: 10 * 1024 * 1024 } });
-    let prompt = '';
-    let imageBuffer = null;
-    let imageMimeType = null;
+    let userId = null;
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+        const idToken = authHeader.split('Bearer ')[1];
+        try {
+            if (adminInitialized && admin.auth) {
+                const decodedToken = await admin.auth().verifyIdToken(idToken);
+                userId = decodedToken.uid;
+            }
+        } catch (err) {
+            console.log('Auth token invalid, proceeding as guest');
+        }
+    }
 
-    busboy.on('field', (fieldname, val) => {
-      if (fieldname === 'prompt') prompt = val;
-    });
+    if (userId) {
+        const creditInfo = await getUserCredits(userId);
+        if (creditInfo.credits <= 0) return res.status(403).json({ error: 'Insufficient credits. Please upgrade.' });
+    } else {
+        const guestCheck = checkAndIncrementGuest(req, false);
+        if (!guestCheck.allowed) return res.status(403).json({ error: 'guest_limit_reached', remaining: 0 });
+    }
+
+    const busboy = Busboy({ headers: req.headers, limits: { fileSize: 50 * 1024 * 1024 } });
+    let fields = {};
+    let imageBuffers = [];
+    let endImageBuffer = null;
+    let uploadError = null;
+
+    busboy.on('field', (fieldname, val) => { fields[fieldname] = val; });
 
     busboy.on('file', (fieldname, file, info) => {
-      if (fieldname === 'image') {
-        const chunks = [];
-        file.on('data', (data) => chunks.push(data));
-        file.on('end', () => {
-          imageBuffer = Buffer.concat(chunks);
-          imageMimeType = info.mimeType;
-        });
-      }
+        const { filename, mimeType } = info;
+        if (fieldname === 'image') {
+            const allowedImageTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+            if (!allowedImageTypes.includes(mimeType)) {
+                uploadError = new Error('Invalid image type. Allowed: JPEG, PNG, WebP');
+                return;
+            }
+            const chunks = [];
+            file.on('data', (data) => chunks.push(data));
+            file.on('end', () => { imageBuffers.push({ buffer: Buffer.concat(chunks), mimeType, filename }); });
+        } else if (fieldname === 'endImage') {
+            const allowedImageTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+            if (!allowedImageTypes.includes(mimeType)) {
+                uploadError = new Error('Invalid end image type. Allowed: JPEG, PNG, WebP');
+                return;
+            }
+            const chunks = [];
+            file.on('data', (data) => chunks.push(data));
+            file.on('end', () => { endImageBuffer = { buffer: Buffer.concat(chunks), mimeType, filename }; });
+        } else {
+            file.resume();
+        }
     });
 
     busboy.on('finish', async () => {
-      try {
-        let finalPrompt = prompt.trim();
-        if (!finalPrompt) {
-          return res.status(400).json({ error: 'Prompt is required' });
+        try {
+            if (uploadError) return res.status(400).json({ error: uploadError.message });
+
+            const prompt = fields.prompt ? fields.prompt.trim() : '';
+            let duration = parseFloat(fields.duration) || 5;
+            const mode = fields.mode || 'video';
+            const ratio = fields.ratio || '9:16';
+
+            const validRatios = ['16:9', '4:3', '1:1', '3:4', '9:16'];
+            if (!validRatios.includes(ratio)) return res.status(400).json({ error: `Invalid ratio. Must be one of: ${validRatios.join(', ')}` });
+
+            let agnesResolution;
+            let maxFrames;
+            if (duration <= 7) { agnesResolution = '1080p'; maxFrames = 169; }
+            else if (duration <= 17) { agnesResolution = '720p'; maxFrames = 409; }
+            else { duration = Math.min(duration, 40); agnesResolution = '480p'; maxFrames = 961; }
+
+            const targetFrames = Math.round(duration * 24);
+            let num_frames = Math.round((targetFrames - 1) / 8) * 8 + 1;
+            num_frames = Math.max(9, num_frames);
+            num_frames = Math.min(num_frames, maxFrames);
+            const actualDuration = (num_frames / 24).toFixed(1);
+
+            console.log(`Requested ${duration}s, using ${num_frames} frames (${actualDuration}s) at ${agnesResolution} ratio=${ratio} mode=${mode}`);
+
+            let imageUrls = [];
+            if (imageBuffers.length > 0) {
+                for (const img of imageBuffers) {
+                    const timestamp = Date.now();
+                    const uniqueId = uuidv4();
+                    const ext = img.filename.split('.').pop();
+                    const key = `agnese_video_refs/${timestamp}-${uniqueId}.${ext}`;
+                    const url = await uploadToR2(img.buffer, key, img.mimeType);
+                    imageUrls.push(url);
+                }
+            }
+
+            if (imageUrls.length === 0 && fields.referenceUrl) {
+                const thumbInfo = await getThumbnailFromUrl(fields.referenceUrl);
+                if (thumbInfo) {
+                    const timestamp = Date.now();
+                    const uniqueId = uuidv4();
+                    const key = `agnese_video_refs/${timestamp}-${uniqueId}.jpg`;
+                    const url = await uploadToR2(thumbInfo.buffer, key, thumbInfo.mimeType);
+                    imageUrls.push(url);
+                    console.log('✅ Extracted thumbnail from reference URL:', fields.referenceUrl);
+                } else {
+                    console.warn('⚠️ Could not extract thumbnail; continuing without image.');
+                }
+            }
+
+            let endImageUrl = null;
+            if (endImageBuffer) {
+                const timestamp = Date.now();
+                const uniqueId = uuidv4();
+                const ext = endImageBuffer.filename.split('.').pop();
+                const key = `agnese_video_refs/${timestamp}-${uniqueId}.${ext}`;
+                endImageUrl = await uploadToR2(endImageBuffer.buffer, key, endImageBuffer.mimeType);
+                console.log('✅ End image uploaded for keyframe:', endImageUrl);
+            }
+
+            let agnesMode;
+            if (mode === 'keyframe') agnesMode = 'keyframes';
+            else if (imageUrls.length > 1) agnesMode = 'multi_reference';
+            else agnesMode = 'ti2vid';
+
+            const requestData = {
+                model: 'agnes-video-v2.0', prompt, num_frames, mode: agnesMode,
+                fps: 24, resolution: agnesResolution, ratio, duration
+            };
+
+            if (agnesMode === 'ti2vid') {
+                if (imageUrls.length === 1) requestData.image = imageUrls[0];
+                else if (imageUrls.length > 1) requestData.image = imageUrls[0];
+            } else if (agnesMode === 'multi_reference') {
+                requestData.images = imageUrls;
+            } else if (agnesMode === 'keyframes') {
+                if (imageUrls.length >= 2) requestData.image = [imageUrls[0], imageUrls[1]];
+                else if (imageUrls.length === 1 && endImageUrl) requestData.image = [imageUrls[0], endImageUrl];
+                else if (imageUrls.length === 0 && endImageUrl) requestData.image = [endImageUrl, endImageUrl];
+                else return res.status(400).json({ error: 'Keyframe mode requires at least 2 images.' });
+            }
+
+            console.log('Agnes request payload:', JSON.stringify(requestData, null, 2));
+
+            const https = require('https');
+            const agent = new https.Agent({ servername: AGNES_API_HOST });
+            const url = `https://${AGNES_API_IP}/v1/videos`;
+
+            const maxRetries = 3;
+            let lastError = null;
+            let response = null;
+
+            for (let attempt = 0; attempt < maxRetries; attempt++) {
+                try {
+                    console.log(`Attempt ${attempt + 1}/${maxRetries} to create Agnes video task...`);
+                    response = await axios.post(url, requestData, {
+                        headers: { 'Authorization': `Bearer ${AGNES_API_KEY}`, 'Content-Type': 'application/json', 'Host': AGNES_API_HOST },
+                        httpsAgent: agent, timeout: 60000
+                    });
+                    break;
+                } catch (error) {
+                    lastError = error;
+                    console.error(`Attempt ${attempt + 1} failed:`, error.message);
+                    if (error.code === 'ENOTFOUND' || error.code === 'ECONNREFUSED' || error.code === 'ECONNRESET') {
+                        const waitMs = Math.min(1000 * Math.pow(2, attempt), 8000);
+                        console.log(`Network error, retrying in ${waitMs}ms...`);
+                        await new Promise(resolve => setTimeout(resolve, waitMs));
+                        continue;
+                    }
+                    break;
+                }
+            }
+
+            if (!response) {
+                let statusCode = 503;
+                let errorMessage = 'Failed to create video task due to network issues.';
+                let retryAfter = 30;
+                let details = lastError?.message || 'Unknown error';
+
+                if (lastError && lastError.response) {
+                    const status = lastError.response.status;
+                    const data = lastError.response.data;
+                    if (status === 429) {
+                        statusCode = 429;
+                        errorMessage = 'You have reached the Agnes video generation limit. Please wait and try again.';
+                        retryAfter = lastError.response.headers['retry-after'] || 60;
+                    } else if (status === 400) {
+                        statusCode = 400;
+                        errorMessage = 'Bad request to Agnes API. Check reference image and prompt.';
+                        details = JSON.stringify(data) || 'No response data';
+                        console.error('❌ Agnes API 400 response:', JSON.stringify(data, null, 2));
+                    } else if (data && data.error) {
+                        details = JSON.stringify(data.error);
+                    }
+                }
+
+                console.error('Agnes video creation failed after retries:', details);
+                return res.status(statusCode).json({ error: errorMessage, retryAfter, details });
+            }
+
+            if (!response.data || !response.data.video_id) {
+                console.error('Unexpected Agnes response:', response.data);
+                throw new Error('Could not create video task.');
+            }
+
+            if (userId) {
+                await deductCredit(userId);
+                const remainingCredits = (await getUserCredits(userId)).credits;
+                console.log(`✅ Agnes video task created with video_id: ${response.data.video_id} for user ${userId}`);
+                res.json({ success: true, video_id: response.data.video_id, remainingCredits, message: 'Video generation task created successfully.' });
+            } else {
+                checkAndIncrementGuest(req, true);
+                const guestCheck = checkAndIncrementGuest(req, false);
+                console.log(`✅ Agnes video task created with video_id: ${response.data.video_id} for guest`);
+                res.json({ success: true, video_id: response.data.video_id, remainingCredits: guestCheck.remaining, message: 'Video generation task created successfully.', isGuest: true });
+            }
+        } catch (error) {
+            console.error('Agnes video generation error:', error.response?.data || error.message);
+            res.status(500).json({ error: 'Failed to create video generation task.', details: error.response?.data || error.message });
         }
+    });
 
-        // Optional: Use GPT-4 Vision to describe uploaded image (keep this part)
-        let imageDescription = '';
-        if (imageBuffer) {
-          try {
-            const base64Image = imageBuffer.toString('base64');
-            const visionResponse = await openai.chat.completions.create({
-              model: 'gpt-4-vision-preview',
-              messages: [{
-                role: 'user',
-                content: [
-                  { type: 'text', text: 'Describe this image in detail, focusing on style, composition, colors, and content. Keep it under 200 words.' },
-                  { type: 'image_url', image_url: { url: `data:${imageMimeType || 'image/png'};base64,${base64Image}` } }
-                ]
-              }],
-              max_tokens: 500,
-            });
-            imageDescription = visionResponse.choices[0].message.content;
-            finalPrompt = `Using this image description as reference: "${imageDescription}". Now generate a new image based on this prompt: "${prompt}"`;
-          } catch (visionError) {
-            console.error('Vision API error:', visionError.message);
-            // Continue without description if vision fails
-          }
-        }
-
-        // ===== Generate image using Pollinations.ai =====
-        const encodedPrompt = encodeURIComponent(finalPrompt);
-        const pollinationsUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=1024&height=1024&model=flux&nologo=true`;
-
-        const response = await axios({
-          method: 'get',
-          url: pollinationsUrl,
-          responseType: 'arraybuffer',
-          timeout: 30000,
-        });
-
-        const base64Image = Buffer.from(response.data, 'binary').toString('base64');
-        const mimeType = response.headers['content-type'] || 'image/png';
-        const imageUrl = `data:${mimeType};base64,${base64Image}`;
-
-        console.log('✅ Image generated via Pollinations.ai');
-
-        // Deduct credit
-        await deductCredit(userId);
-
-        res.json({
-          success: true,
-          imageUrl,
-          remainingCredits: (await getUserCredits(userId)).credits,
-          prompt: finalPrompt,
-          modelUsed: 'pollinations.ai (flux)'
-        });
-      } catch (error) {
-        console.error('Generation error:', error);
-        res.status(500).json({ error: error.message || 'Image generation failed' });
-      }
+    busboy.on('error', (err) => {
+        console.error('Busboy error:', err);
+        res.status(500).json({ error: 'Request parsing error' });
     });
 
     req.pipe(busboy);
-  } catch (error) {
-    console.error('Generate image error:', error);
-    res.status(500).json({ error: error.message });
-  }
 });
 
-// Top-up credits: create Razorpay order for ₹20 (50 credits)
+app.get('/api/poll-agnes-video', async (req, res) => {
+    const { video_id } = req.query;
+    if (!video_id) return res.status(400).json({ error: 'video_id is required.' });
+    if (!AGNES_API_KEY) return res.status(500).json({ error: 'Server configuration error: Agnes API Key missing.' });
+
+    const https = require('https');
+    const agent = new https.Agent({ servername: AGNES_API_HOST });
+    const url = `https://${AGNES_API_IP}/agnesapi`;
+
+    const maxRetries = 3;
+    let lastError = null;
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+            const response = await axios.get(url, {
+                params: { video_id },
+                headers: { 'Authorization': `Bearer ${AGNES_API_KEY}`, 'Host': AGNES_API_HOST },
+                httpsAgent: agent, timeout: 30000
+            });
+            return res.json(response.data);
+        } catch (error) {
+            lastError = error;
+            if (error.code === 'ENOTFOUND' || error.code === 'ECONNREFUSED' || error.code === 'ECONNRESET') {
+                const waitMs = Math.min(1000 * Math.pow(2, attempt), 8000);
+                console.log(`Network error (attempt ${attempt + 1}/${maxRetries}), retrying in ${waitMs}ms...`);
+                await new Promise(resolve => setTimeout(resolve, waitMs));
+                continue;
+            }
+            break;
+        }
+    }
+
+    let statusCode = 500;
+    let errorMessage = 'Failed to poll video status.';
+    let retryAfter = null;
+    let details = lastError?.message || 'Unknown error';
+
+    if (lastError && lastError.response) {
+        const status = lastError.response.status;
+        const data = lastError.response.data;
+        if (status === 429) {
+            statusCode = 429;
+            errorMessage = 'Rate limit exceeded for status checks. Please wait a moment.';
+            retryAfter = lastError.response.headers['retry-after'] || 30;
+            console.log(`⏳ Status poll rate limited. Retry after ${retryAfter}s`);
+        } else if (data && data.error && data.error.message) {
+            errorMessage = data.error.message;
+            details = data.error.message;
+        }
+    } else if (lastError && lastError.code === 'ENOTFOUND') {
+        statusCode = 503;
+        errorMessage = 'Network error: Unable to reach Agnes API. Please check your internet connection.';
+        retryAfter = 30;
+        details = 'DNS resolution failed for Agnes API after retries.';
+        console.error(details);
+    }
+
+    console.error('Error polling Agnes video status:', details);
+    res.status(statusCode).json({ error: errorMessage, retryAfter, details });
+});
+
+// ==================== TOP-UP CREDITS ====================
 app.post('/api/top-up-credits', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'Authentication required' });
-    }
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Authentication required' });
     const idToken = authHeader.split('Bearer ')[1];
     const decodedToken = await admin.auth().verifyIdToken(idToken);
     const userId = decodedToken.uid;
 
     if (!razorpay) {
-      // Demo mode
-      return res.json({
-        success: true,
-        orderId: 'order_demo_topup_' + Date.now(),
-        amount: 2000, // 20 INR in paise
-        currency: 'INR',
-        isDemo: true,
-        keyId: razorpayKeyId || 'rzp_live_SXMEZ6fYLjDmzD'
-      });
+      return res.json({ success: true, orderId: 'order_demo_topup_' + Date.now(), amount: 2000, currency: 'INR', isDemo: true, keyId: razorpayKeyId || 'rzp_live_SXMEZ6fYLjDmzD' });
     }
 
-    const options = {
-      amount: 2000, // ₹20
-      currency: 'INR',
-      notes: {
-        userId: userId,
-        type: 'credit_topup',
-        credits: 50
-      },
-      payment_capture: 1
-    };
+    const options = { amount: 2000, currency: 'INR', notes: { userId, type: 'credit_topup', credits: 50 }, payment_capture: 1 };
     const order = await razorpay.orders.create(options);
-    res.json({
-      success: true,
-      orderId: order.id,
-      amount: order.amount,
-      currency: order.currency,
-      isDemo: false,
-      keyId: razorpayKeyId
-    });
+    res.json({ success: true, orderId: order.id, amount: order.amount, currency: order.currency, isDemo: false, keyId: razorpayKeyId });
   } catch (error) {
     console.error('Top-up order error:', error);
     res.status(500).json({ error: 'Failed to create top-up order' });
   }
 });
 
-// Verify top-up payment
 app.post('/api/verify-topup', async (req, res) => {
   try {
     const { orderId, paymentId, signature, userId } = req.body;
     if (!razorpay) {
-      // Demo mode: add credits
       await addCredits(userId, 50);
       return res.json({ success: true, message: 'Added 50 credits (demo)' });
     }
-
     const crypto = require('crypto');
-    const generatedSignature = crypto
-      .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
-      .update(orderId + '|' + paymentId)
-      .digest('hex');
-
-    if (generatedSignature !== signature) {
-      return res.status(400).json({ error: 'Invalid payment signature' });
-    }
-
+    const generatedSignature = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET).update(orderId + '|' + paymentId).digest('hex');
+    if (generatedSignature !== signature) return res.status(400).json({ error: 'Invalid payment signature' });
     await addCredits(userId, 50);
     res.json({ success: true, message: 'Added 50 credits' });
   } catch (error) {
@@ -5280,7 +4545,299 @@ app.post('/api/verify-topup', async (req, res) => {
   }
 });
 
-// Helper functions
+// ==================== SOCIAL FEED / CHAT ====================
+let chatClients = [];
+
+app.get('/api/chat/stream', async (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'Access-Control-Allow-Origin': '*'
+  });
+  const recentMessages = await getRecentMessages(50);
+  res.write(`data: ${JSON.stringify({ type: 'init', messages: recentMessages })}\n\n`);
+  const clientId = Date.now() + '-' + Math.random();
+  chatClients.push({ id: clientId, res });
+  req.on('close', () => { chatClients = chatClients.filter(c => c.id !== clientId); });
+  const keepAlive = setInterval(() => { res.write(': keepalive\n\n'); }, 30000);
+  req.on('end', () => clearInterval(keepAlive));
+});
+
+app.get('/api/chat/messages', async (req, res) => {
+  const limit = parseInt(req.query.limit) || 50;
+  const messages = await getRecentMessages(limit);
+  res.json({ messages });
+});
+
+app.post('/api/chat/send', async (req, res) => {
+  const { userId, userName, content, parentId, sticker } = req.body;
+  if (!content && !sticker) return res.status(400).json({ error: 'Message content or sticker required' });
+  const message = {
+    id: uuidv4(),
+    userId: userId || 'anonymous',
+    userName: userName || 'Anonymous',
+    content: content || '',
+    parentId: parentId || null,
+    sticker: sticker || null,
+    reactions: {},
+    timestamp: new Date().toISOString()
+  };
+  if (db && db.collection) await db.collection('chat_messages').doc(message.id).set(message);
+  else { if (!global.chatMessages) global.chatMessages = []; global.chatMessages.push(message); }
+  broadcastChatMessage(message);
+  res.json({ success: true, message });
+});
+
+app.post('/api/chat/react', async (req, res) => {
+  const { messageId, userId, emoji } = req.body;
+  if (!messageId || !emoji) return res.status(400).json({ error: 'Missing messageId or emoji' });
+  if (db && db.collection) {
+    const msgRef = db.collection('chat_messages').doc(messageId);
+    await msgRef.update({ [`reactions.${emoji}`]: admin.firestore.FieldValue.arrayUnion(userId || 'anonymous') });
+    const updated = await msgRef.get();
+    broadcastChatMessage({ type: 'reaction', messageId, reactions: updated.data().reactions });
+  } else {
+    const msg = global.chatMessages?.find(m => m.id === messageId);
+    if (msg) {
+      if (!msg.reactions) msg.reactions = {};
+      if (!msg.reactions[emoji]) msg.reactions[emoji] = [];
+      if (!msg.reactions[emoji].includes(userId || 'anonymous')) msg.reactions[emoji].push(userId || 'anonymous');
+      broadcastChatMessage({ type: 'reaction', messageId, reactions: msg.reactions });
+    }
+  }
+  res.json({ success: true });
+});
+
+app.get('/api/activity', async (req, res) => {
+  const limit = parseInt(req.query.limit) || 20;
+  const items = await getRecentActivity(limit);
+  res.json({ items });
+});
+
+async function getRecentMessages(limit = 50) {
+  if (db && db.collection) {
+    const snapshot = await db.collection('chat_messages').orderBy('timestamp', 'desc').limit(limit).get();
+    return snapshot.docs.map(d => ({ id: d.id, ...d.data() })).reverse();
+  } else {
+    const messages = global.chatMessages || [];
+    return messages.slice(-limit);
+  }
+}
+
+async function getRecentActivity(limit = 20) {
+  if (db && db.collection) {
+    const snapshot = await db.collection('activity_feed').orderBy('timestamp', 'desc').limit(limit).get();
+    return snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+  } else {
+    const items = global.activityFeed || [];
+    return items.slice(-limit);
+  }
+}
+
+function broadcastChatMessage(message) {
+  chatClients.forEach(client => {
+    client.res.write(`data: ${JSON.stringify({ type: 'message', message })}\n\n`);
+  });
+}
+
+function broadcastActivity(activity) {
+  chatClients.forEach(client => {
+    client.res.write(`data: ${JSON.stringify({ type: 'activity', activity })}\n\n`);
+  });
+}
+
+// ==================== PWA PUSH NOTIFICATIONS ====================
+app.post('/api/push/subscribe', async (req, res) => {
+  try {
+    const { userId, token, userAgent } = req.body;
+    if (!userId || !token) return res.status(400).json({ error: 'Missing userId or token' });
+    if (db && db.collection) {
+      const userRef = db.collection('users').doc(userId);
+      await userRef.set({
+        pushToken: token,
+        pushUserAgent: userAgent || null,
+        pushUpdatedAt: new Date().toISOString(),
+        pushEnabled: true
+      }, { merge: true });
+      console.log(`✅ Push token saved for user ${userId}`);
+    } else {
+      if (!global.pushTokens) global.pushTokens = {};
+      global.pushTokens[userId] = token;
+    }
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error saving push token:', error);
+    res.status(500).json({ error: 'Failed to save push token' });
+  }
+});
+
+app.post('/api/push/unsubscribe', async (req, res) => {
+  try {
+    const { userId, token } = req.body;
+    if (!userId) return res.status(400).json({ error: 'Missing userId' });
+    if (db && db.collection) {
+      const userRef = db.collection('users').doc(userId);
+      await userRef.update({ pushToken: null, pushEnabled: false, pushUpdatedAt: new Date().toISOString() });
+    } else {
+      delete global.pushTokens[userId];
+    }
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error removing push token:', error);
+    res.status(500).json({ error: 'Failed to remove push token' });
+  }
+});
+
+async function sendPushNotification(userId, title, body, data = {}) {
+  if (!db && !global.pushTokens) { console.log('Push tokens not available'); return; }
+  let token = null;
+  if (db && db.collection) {
+    const doc = await db.collection('users').doc(userId).get();
+    if (doc.exists) {
+      const userData = doc.data();
+      if (userData.pushEnabled !== false) token = userData.pushToken;
+    }
+  } else {
+    token = global.pushTokens[userId];
+  }
+  if (!token) { console.log(`No push token for user ${userId}`); return; }
+  if (!adminInitialized) { console.log('Firebase Admin not initialized, cannot send push'); return; }
+  try {
+    const message = {
+      notification: { title, body, icon: 'https://www.toolsprompt.com/logo.png', badge: 'https://www.toolsprompt.com/logo.png' },
+      data, token,
+      webpush: { fcm_options: { link: data.link || 'https://www.toolsprompt.com/' } }
+    };
+    const response = await admin.messaging().send(message);
+    console.log(`✅ Push notification sent to ${userId}: ${response}`);
+  } catch (error) {
+    console.error('Error sending push notification:', error);
+    if (error.code === 'messaging/invalid-registration-token' || error.code === 'messaging/registration-token-not-registered') {
+      if (db && db.collection) {
+        await db.collection('users').doc(userId).update({ pushToken: null, pushUpdatedAt: new Date().toISOString() });
+      } else {
+        delete global.pushTokens[userId];
+      }
+      console.log(`Removed invalid token for user ${userId}`);
+    }
+  }
+}
+
+async function sendPushToAllUsers(title, body, data = {}) {
+  if (!db) return;
+  try {
+    const snapshot = await db.collection('users').where('pushEnabled', '==', true).where('pushToken', '!=', null).get();
+    const tokens = snapshot.docs.map(doc => ({ userId: doc.id, token: doc.data().pushToken }));
+    if (tokens.length === 0) return;
+    if (admin.messaging) {
+      const messages = tokens.map(({ token }) => ({
+        notification: { title, body }, data, token,
+        webpush: { fcm_options: { link: data.link || 'https://www.toolsprompt.com/' } }
+      }));
+      for (let i = 0; i < messages.length; i += 500) {
+        const chunk = messages.slice(i, i + 500);
+        const response = await admin.messaging().sendEach(chunk);
+        console.log(`✅ Sent ${chunk.length} push notifications:`, response);
+        if (response.failureCount > 0) {
+          for (let j = 0; j < response.responses.length; j++) {
+            const resp = response.responses[j];
+            if (resp.error) {
+              const userId = tokens[i + j]?.userId;
+              if (userId) await db.collection('users').doc(userId).update({ pushToken: null, pushUpdatedAt: new Date().toISOString() });
+            }
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Error sending push notifications:', error);
+  }
+}
+
+// ==================== REFERRAL SYSTEM ====================
+function generateReferralCode() {
+  return Math.random().toString(36).substring(2, 8).toUpperCase();
+}
+
+async function ensureUserReferralCode(userId) {
+  if (!db) return 'DEMO123';
+  const userRef = db.collection('users').doc(userId);
+  const doc = await userRef.get();
+  if (!doc.exists) {
+    const code = generateReferralCode();
+    await userRef.set({ referralCode: code, referralProcessed: false, referralCount: 0, createdAt: new Date().toISOString() });
+    return code;
+  } else {
+    const data = doc.data();
+    if (!data.referralCode) {
+      const code = generateReferralCode();
+      await userRef.update({ referralCode: code });
+      return code;
+    }
+    return data.referralCode;
+  }
+}
+
+app.post('/api/process-referral', async (req, res) => {
+  try {
+    console.log('📌 /api/process-referral called with:', req.body);
+    const { userId, referralCode } = req.body;
+    if (!userId || !referralCode) return res.status(400).json({ error: 'Missing userId or referralCode' });
+
+    const userRef = db.collection('users').doc(userId);
+    const userDoc = await userRef.get();
+    if (!userDoc.exists) return res.status(404).json({ error: 'User not found' });
+    const userData = userDoc.data();
+    if (userData.referralProcessed === true) return res.json({ success: false, message: 'Referral already processed' });
+
+    const referrerSnapshot = await db.collection('users').where('referralCode', '==', referralCode).get();
+    if (referrerSnapshot.empty) return res.status(400).json({ error: 'Invalid referral code' });
+    const referrerDoc = referrerSnapshot.docs[0];
+    const referrerId = referrerDoc.id;
+
+    if (referrerId === userId) return res.status(400).json({ error: 'Cannot refer yourself' });
+
+    await addCredits(referrerId, 10);
+    await addCredits(userId, 5);
+
+    await userRef.update({ referralProcessed: true, referredBy: referrerId, referralProcessedAt: new Date().toISOString() });
+    await db.collection('users').doc(referrerId).update({ referralCount: admin.firestore.FieldValue.increment(1) });
+
+    res.json({ success: true, message: 'Referral credits awarded' });
+  } catch (error) {
+    console.error('Referral processing error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.get('/api/referral-link', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Not authenticated' });
+    const idToken = authHeader.split('Bearer ')[1];
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    const userId = decoded.uid;
+
+    const code = await ensureUserReferralCode(userId);
+    const userDoc = await db.collection('users').doc(userId).get();
+    const data = userDoc.data();
+    const credits = await getUserCredits(userId);
+
+    res.json({
+      success: true,
+      referralCode: code,
+      referralLink: `${process.env.BASE_URL || 'https://www.toolsprompt.com'}/login.html?ref=${code}`,
+      referralCount: data?.referralCount || 0,
+      credits: credits.credits
+    });
+  } catch (error) {
+    console.error('Referral link error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ==================== HELPER FUNCTIONS FOR PAGE GENERATION ====================
 function createNewsData(news, id) {
   const safeNews = news || {};
   return {
@@ -5300,28 +4857,26 @@ function createNewsData(news, id) {
     createdAt: safeDateToString(safeNews.createdAt),
     publishedAt: safeDateToString(safeNews.publishedAt),
     seoTitle: safeNews.seoTitle || safeNews.title || 'AI News - tools prompt',
-    metaDescription: safeNews.metaDescription || (safeNews.content ? 
-      safeNews.content.substring(0, 155) + '...' : 
-      'Latest AI news and prompt engineering updates from tools prompt.')
+    metaDescription: safeNews.metaDescription || (safeNews.content ? safeNews.content.substring(0, 155) + '...' : 'Latest AI news and prompt engineering updates from tools prompt.')
   };
 }
 
 function createPromptData(prompt, id, hasPurchased = false) {
   const safePrompt = prompt || {};
-  const isVideo = safePrompt.fileType === 'video' || safePrompt.videoUrl || 
+  const isVideo = safePrompt.fileType === 'video' || safePrompt.videoUrl ||
                   (safePrompt.mediaUrl && safePrompt.mediaUrl.includes('video')) ||
                   safePrompt.category === 'video';
   const detectedPlatform = AIModelManager.detectPlatform(safePrompt);
-  const platformInfo = isVideo 
+  const platformInfo = isVideo
     ? AIModelManager.getVideoModelInfo(detectedPlatform)
     : AIModelManager.getPhotoModelInfo(detectedPlatform);
-  const thumbnailUrl = safePrompt.thumbnailUrl || 
+  const thumbnailUrl = safePrompt.thumbnailUrl ||
                       (isVideo ? 'https://via.placeholder.com/300x400/ff6b6b/ffffff?text=Video+Reel' : null);
   const isPaid = safePrompt.price > 0;
   const fullPromptText = safePrompt.promptText || 'No prompt text available.';
   let promptText = fullPromptText;
   if (isPaid && !hasPurchased) {
-    promptText = fullPromptText.length > 100 
+    promptText = fullPromptText.length > 100
       ? fullPromptText.substring(0, 100) + '... [Full prompt text available after purchase]'
       : fullPromptText + ' [Full prompt text available after purchase]';
   }
@@ -5330,19 +4885,18 @@ function createPromptData(prompt, id, hasPurchased = false) {
     id: id || 'unknown',
     title: safePrompt.title || 'Untitled Prompt',
     seoTitle: safePrompt.seoTitle || safePrompt.title || (isVideo ? 'AI Video Prompt - tools prompt' : 'AI Prompt - tools prompt'),
-    metaDescription: safePrompt.metaDescription || (safePrompt.promptText ? 
-      safePrompt.promptText.substring(0, 155) + '...' : 
+    metaDescription: safePrompt.metaDescription || (safePrompt.promptText ?
+      safePrompt.promptText.substring(0, 155) + '...' :
       (isVideo ? 'Explore this AI-generated video and learn prompt engineering techniques.' : 'Explore this AI-generated content and learn prompt engineering techniques.')),
     imageUrl: safePrompt.thumbnailUrl || safePrompt.imageUrl || safePrompt.mediaUrl || thumbnailUrl ||
-              (isVideo ? 'https://via.placeholder.com/300x400/ff6b6b/ffffff?text=Video+Reel' : 
-               'https://via.placeholder.com/800x400/4e54c8/ffffff?text=Prompt+Seen+AI+Image'),
+              (isVideo ? 'https://via.placeholder.com/300x400/ff6b6b/ffffff?text=Video+Reel' : 'https://via.placeholder.com/800x400/4e54c8/ffffff?text=Prompt+Seen+AI+Image'),
     videoUrl: safePrompt.videoUrl || (isVideo ? safePrompt.mediaUrl : null),
     mediaUrl: safePrompt.mediaUrl || safePrompt.imageUrl || safePrompt.videoUrl,
     fileType: safePrompt.fileType || (isVideo ? 'video' : 'image'),
-    promptText: promptText,
-    fullPromptText: fullPromptText,
+    promptText,
+    fullPromptText,
     userName: safePrompt.userName || 'Anonymous',
-userId: safePrompt.userId || 'anonymous', 
+    userId: safePrompt.userId || 'anonymous',
     likes: safePrompt.likes || 0,
     views: safePrompt.views || 0,
     uses: safePrompt.uses || 0,
@@ -5356,1386 +4910,2372 @@ userId: safePrompt.userId || 'anonymous',
     adsenseMigrated: safePrompt.adsenseMigrated || false,
     videoDuration: safePrompt.videoDuration || null,
     videoFormat: safePrompt.videoFormat || null,
-    thumbnailUrl: thumbnailUrl,
+    thumbnailUrl,
     hasCustomThumbnail: !!safePrompt.thumbnailUrl,
-    detectedPlatform: detectedPlatform,
-    platformInfo: platformInfo,
+    detectedPlatform,
+    platformInfo,
     price: safePrompt.price || 0,
-    isPaid: isPaid,
-    hasPurchased: hasPurchased,
+    isPaid,
+    hasPurchased,
     salesCount: safePrompt.salesCount || 0,
     totalEarnings: safePrompt.totalEarnings || 0
   };
 
-  let detailedExplanation = safePrompt.aboutDescription;
-  if (!detailedExplanation) {
-    detailedExplanation = AIPlatformContentGenerator.generatePlatformIntroduction(promptData);
+ let detailedExplanation =
+  safePrompt.aboutDescription ||
+  (safePrompt.customContent && safePrompt.customContent.aboutDescription) ||
+  '';
+
+if (!detailedExplanation) {
+  detailedExplanation = AIPlatformContentGenerator.generatePlatformIntroduction(promptData);
+}
+promptData.detailedExplanation = detailedExplanation;
+  const cc = safePrompt.customContent || {};
+  promptData.customContent = cc;
+
+  const has = (v) => typeof v === 'string' && v.trim().length > 0;
+
+  promptData.showPlatformComparison = has(cc.platformComparison);
+  promptData.showTopTools            = has(cc.topTools);
+  promptData.showModelTips           = has(cc.modelTips);
+  promptData.showHowTo               = has(cc.howToSteps);
+  promptData.showExpertTips          = has(cc.expertTips);
+  promptData.showUsageTips           = has(cc.usageTips);
+  promptData.showOptimizationTips    = has(cc.optimizationTips);
+
+  promptData.showExtraSections =
+    promptData.showPlatformComparison ||
+    promptData.showTopTools            ||
+    promptData.showModelTips           ||
+    promptData.showHowTo               ||
+    promptData.showExpertTips          ||
+    promptData.showUsageTips           ||
+    promptData.showOptimizationTips;
+
+  promptData.hasCustomContent = promptData.showExtraSections;
+
+  promptData.platformComparison = promptData.showPlatformComparison
+    ? cc.platformComparison.trim()
+    : '';
+
+  if (promptData.showTopTools) {
+    promptData.customTopToolsRaw = cc.topTools.trim();
+    promptData.bestAITools = [];
+  } else {
+    promptData.customTopToolsRaw = '';
+    promptData.bestAITools = [];
   }
-  promptData.detailedExplanation = detailedExplanation;
+
+  promptData.modelSpecificTips = promptData.showModelTips
+    ? cc.modelTips.trim()
+    : '';
+
+  if (promptData.showHowTo) {
+    promptData.customHowToSteps = cc.howToSteps
+      .split('\n').map(s => s.trim()).filter(Boolean);
+  } else {
+    promptData.customHowToSteps = [];
+  }
 
   const aiDescription = AIDescriptionGenerator.generateComprehensiveDescription(promptData);
-  promptData.stepByStepInstructions = PromptContentGenerator.generateStepByStepInstructions(promptData);
-  promptData.bestAITools = AIDescriptionGenerator.generateBestAITools(promptData);
-  promptData.trendAnalysis = PromptContentGenerator.generateTrendAnalysis(promptData);
-  promptData.usageTips = PromptContentGenerator.generateUsageTips(promptData);
-  promptData.seoTips = PromptContentGenerator.generateSEOTips(promptData);
   promptData.aiStepByStepGuide = aiDescription.stepByStep;
-  promptData.aiExpertTips = aiDescription.tips;
-  promptData.platformComparison = AIDescriptionGenerator.generatePlatformComparison(promptData);
-  promptData.modelSpecificTips = AIDescriptionGenerator.generateModelSpecificTips();
+  promptData.stepByStepInstructions = PromptContentGenerator.generateStepByStepInstructions(promptData);
+
+  promptData.aiExpertTips = promptData.showExpertTips
+    ? cc.expertTips.split('\n').map(s => s.trim()).filter(Boolean)
+    : [];
+
+  promptData.usageTips = promptData.showUsageTips
+    ? cc.usageTips.split('\n').map(s => s.trim()).filter(Boolean)
+    : [];
+
+  promptData.seoTips = promptData.showOptimizationTips
+    ? cc.optimizationTips.split('\n').map(s => s.trim()).filter(Boolean)
+    : [];
+
+  promptData.trendAnalysis = PromptContentGenerator.generateTrendAnalysis(promptData);
+
+  console.log(`✅ Prompt ${promptData.id} section flags →`,
+    'comparison:', promptData.showPlatformComparison,
+    'tools:',      promptData.showTopTools,
+    'modelTips:',  promptData.showModelTips,
+    'howTo:',      promptData.showHowTo,
+    'expertTips:', promptData.showExpertTips,
+    'usageTips:',  promptData.showUsageTips,
+    'optTips:',    promptData.showOptimizationTips
+  );
 
   return promptData;
 }
 
-// ==================== CSS AND HTML FOR PROMPT PAGE ====================
-
-// Mini Browser CSS
-const miniBrowserCSS = `
-.mini-browser-container {
-    position: fixed;
-    bottom: 20px;
-    right: 20px;
-    width: 320px;
-    height: 450px;
-    background: white;
-    border-radius: 12px;
-    box-shadow: 0 10px 30px rgba(0,0,0,0.3);
-    z-index: 10000;
-    display: none;
-    flex-direction: column;
-    overflow: hidden;
-    transition: all 0.3s ease;
-    border: 2px solid #4e54c8;
-    resize: both;
-    min-width: 300px;
-    min-height: 400px;
-}
-
-.mini-browser-container.expanded {
-    width: 90vw !important;
-    height: 90vh !important;
-    bottom: 5vh !important;
-    right: 5vw !important;
-    resize: none;
-}
-
-.mini-browser-header {
-    background: #4e54c8;
-    color: white;
-    padding: 12px 15px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    cursor: move;
-    user-select: none;
-    flex-shrink: 0;
-}
-
-.mini-browser-title {
-    font-size: 0.9rem;
-    font-weight: 600;
-}
-
-.mini-browser-controls {
-    display: flex;
-    gap: 8px;
-}
-
-.mini-browser-btn {
-    background: rgba(255,255,255,0.2);
-    border: none;
-    color: white;
-    width: 28px;
-    height: 28px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    font-size: 0.8rem;
-    transition: all 0.3s ease;
-}
-
-.mini-browser-btn:hover {
-    background: rgba(255,255,255,0.3);
-    transform: scale(1.1);
-}
-
-.mini-browser-content {
-    flex: 1;
-    background: white;
-    position: relative;
-    overflow: hidden;
-}
-
-.mini-browser-iframe {
-    width: 100%;
-    height: 100%;
-    border: none;
-    background: white;
-}
-
-.mini-browser-toggle {
-    position: fixed;
-    bottom: 20px;
-    right: 20px;
-    background: #4e54c8;
-    color: white;
-    border: none;
-    border-radius: 50%;
-    width: 60px;
-    height: 60px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    box-shadow: 0 4px 15px rgba(78, 84, 200, 0.4);
-    z-index: 9999;
-    transition: all 0.3s ease;
-    font-size: 1.5rem;
-}
-
-.mini-browser-toggle:hover {
-    transform: scale(1.1);
-    box-shadow: 0 6px 20px rgba(78, 84, 200, 0.6);
-}
-
-@media (max-width: 768px) {
-    .mini-browser-container {
-        width: 280px;
-        height: 350px;
-        bottom: 10px;
-        right: 10px;
-        min-width: 250px;
-        min-height: 300px;
-    }
-    
-    .mini-browser-container.expanded {
-        width: 95vw !important;
-        height: 70vh !important;
-        bottom: 5vh !important;
-        right: 2.5vw !important;
-    }
-    
-    .mini-browser-toggle {
-        width: 45px;
-        height: 45px;
-        bottom: 10px;
-        right: 10px;
-        font-size: 1.1rem;
-    }
-}
-
-@media (max-width: 480px) {
-    .mini-browser-container {
-        width: 250px;
-        height: 300px;
-        bottom: 8px;
-        right: 8px;
-        min-width: 220px;
-        min-height: 250px;
-    }
-    
-    .mini-browser-container.expanded {
-        width: 98vw !important;
-        height: 60vh !important;
-        bottom: 5vh !important;
-        right: 1vw !important;
-    }
-    
-    .mini-browser-toggle {
-        width: 40px;
-        height: 40px;
-        bottom: 8px;
-        right: 8px;
-        font-size: 1rem;
-    }
-    
-    .title-text {
-        display: none;
-    }
-}
-
-.mini-browser-loading {
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: white;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    color: #666;
-    z-index: 10;
-}
-
-.mini-browser-loading .spinner {
-    border: 3px solid #f3f3f3;
-    border-top: 3px solid #4e54c8;
-    border-radius: 50%;
-    width: 40px;
-    height: 40px;
-    animation: spin 1s linear infinite;
-    margin-bottom: 15px;
-}
-
-@keyframes spin {
-    0% { transform: rotate(0deg); }
-    100% { transform: rotate(360deg); }
-}
-
-.mini-browser-iframe {
-    opacity: 1;
-    transition: opacity 0.3s ease;
-}
-
-.mini-browser-iframe[style*="display: none"] {
-    opacity: 0;
-}
-`;
-
-// Platform Comparison CSS
-const platformComparisonCSS = `
-.platform-comparison {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    color: white;
-    padding: 2rem;
-    border-radius: 15px;
-    margin: 2rem 0;
-    position: relative;
-    overflow: hidden;
-}
-
-.platform-comparison::before {
-    content: '';
-    position: absolute;
-    top: -50%;
-    right: -50%;
-    width: 100%;
-    height: 200%;
-    background: rgba(255,255,255,0.1);
-    transform: rotate(45deg);
-}
-
-.platform-comparison h3 {
-    position: relative;
-    z-index: 1;
-    margin-bottom: 1rem;
-    font-size: 1.5rem;
-    color: white;
-}
-
-.platform-comparison p {
-    position: relative;
-    z-index: 1;
-    opacity: 0.9;
-    margin-bottom: 1.5rem;
-}
-
-.comparison-table-container {
-    position: relative;
-    z-index: 1;
-    overflow-x: auto;
-    margin: 1.5rem 0;
-    background: rgba(255,255,255,0.1);
-    border-radius: 10px;
-    padding: 1rem;
-    backdrop-filter: blur(10px);
-}
-
-.platform-comparison-table {
-    width: 100%;
-    border-collapse: collapse;
-    min-width: 600px;
-}
-
-.platform-comparison-table th {
-    background: rgba(255,255,255,0.2);
-    color: white;
-    font-weight: 600;
-    text-align: left;
-    padding: 1rem;
-    border-bottom: 2px solid rgba(255,255,255,0.3);
-}
-
-.platform-comparison-table td {
-    padding: 1rem;
-    border-bottom: 1px solid rgba(255,255,255,0.1);
-    color: rgba(255,255,255,0.9);
-}
-
-.platform-comparison-table tr:hover {
-    background: rgba(255,255,255,0.1);
-}
-
-.platform-comparison-table tr.primary-platform {
-    background: rgba(255,255,255,0.15);
-    border-left: 4px solid #4e54c8;
-}
-
-.primary-badge {
-    background: #4e54c8;
-    color: white;
-    padding: 2px 8px;
-    border-radius: 12px;
-    font-size: 0.7rem;
-    margin-left: 8px;
-    vertical-align: middle;
-}
-
-.price-tag {
-    display: inline-block;
-    padding: 4px 12px;
-    border-radius: 20px;
-    font-size: 0.8rem;
-    font-weight: 600;
-}
-
-.price-free {
-    background: #20bf6b;
-    color: white;
-}
-
-.price-paid {
-    background: #ff9f43;
-    color: white;
-}
-
-.category-badge {
-    display: inline-block;
-    padding: 4px 12px;
-    border-radius: 20px;
-    font-size: 0.8rem;
-    font-weight: 600;
-    background: rgba(255,255,255,0.2);
-    color: white;
-}
-
-.category-professional {
-    background: #4e54c8;
-}
-
-.category-artistic {
-    background: #9b59b6;
-}
-
-.category-open-source {
-    background: #2c3e50;
-}
-
-.category-free {
-    background: #20bf6b;
-}
-
-.category-commercial {
-    background: #2980b9;
-}
-
-.category-editing {
-    background: #e67e22;
-}
-
-.category-design {
-    background: #f1c40f;
-    color: #333;
-}
-
-.category-versatile {
-    background: #3498db;
-}
-
-.category-mobile {
-    background: #e91e63;
-}
-
-.category-nft {
-    background: #8e44ad;
-}
-
-.category-real-time {
-    background: #16a085;
-}
-
-.category-video {
-    background: #ff6b6b;
-}
-
-.category-animation {
-    background: #f39c12;
-}
-
-.category-social {
-    background: #00acc1;
-}
-
-.category-marketing {
-    background: #d35400;
-}
-
-.category-avatar {
-    background: #c0392b;
-}
-
-.category-cinematic {
-    background: #1abc9c;
-}
-
-.category-motion {
-    background: #d35400;
-}
-
-.category-3d {
-    background: #2ecc71;
-}
-
-.category-expressive {
-    background: #e74c3c;
-}
-
-.category-storytelling {
-    background: #9b59b6;
-}
-
-.comparison-tips {
-    position: relative;
-    z-index: 1;
-    background: rgba(255,255,255,0.1);
-    padding: 1.5rem;
-    border-radius: 10px;
-    margin-top: 1.5rem;
-    backdrop-filter: blur(10px);
-}
-
-.comparison-tips ul {
-    margin: 0;
-    padding-left: 1.5rem;
-}
-
-.comparison-tips li {
-    margin-bottom: 0.5rem;
-    opacity: 0.9;
-}
-
-.model-specific-tips {
-    background: #f8f9fa;
-    padding: 2rem;
-    border-radius: 15px;
-    margin: 2rem 0;
-    border: 2px solid #e9ecef;
-}
-
-.model-specific-tips h4 {
-    color: #4e54c8;
-    margin-bottom: 1.5rem;
-    font-size: 1.3rem;
-}
-
-.model-tips-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-    gap: 1.5rem;
-    margin-top: 1rem;
-}
-
-.model-tip {
-    background: white;
-    padding: 1.5rem;
-    border-radius: 10px;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-    border-top: 4px solid #4e54c8;
-    transition: transform 0.3s ease;
-}
-
-.model-tip:hover {
-    transform: translateY(-5px);
-    box-shadow: 0 8px 20px rgba(0,0,0,0.15);
-}
-
-.model-tip h5 {
-    color: #4e54c8;
-    margin-bottom: 1rem;
-    font-size: 1.1rem;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-}
-
-.model-tip ul {
-    margin: 0;
-    padding-left: 1.2rem;
-}
-
-.model-tip li {
-    margin-bottom: 0.5rem;
-    color: #555;
-    font-size: 0.9rem;
-}
-
-.model-tip code {
-    background: #f1f3f9;
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-family: 'Courier New', monospace;
-    color: #4e54c8;
-    font-size: 0.85rem;
-}
-
-.tools-grid-enhanced {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-    gap: 1.5rem;
-    margin-top: 1rem;
-}
-
-.tool-card-enhanced {
-    background: white;
-    padding: 1.5rem;
-    border-radius: 12px;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-    border-left: 4px solid #4e54c8;
-    transition: all 0.3s ease;
-    position: relative;
-    overflow: hidden;
-}
-
-.tool-card-enhanced:hover {
-    transform: translateY(-5px);
-    box-shadow: 0 8px 20px rgba(0,0,0,0.15);
-}
-
-.tool-card-enhanced.primary-tool {
-    border-left: 4px solid #20bf6b;
-    background: linear-gradient(135deg, #f8f9fa 0%, #ffffff 100%);
-}
-
-.tool-card-enhanced.primary-tool::before {
-    content: '★ Recommended';
-    position: absolute;
-    top: 10px;
-    right: 10px;
-    background: #20bf6b;
-    color: white;
-    padding: 4px 8px;
-    border-radius: 12px;
-    font-size: 0.7rem;
-    font-weight: 600;
-}
-
-.tool-card-enhanced h4 {
-    color: #4e54c8;
-    margin-bottom: 0.75rem;
-    font-size: 1.2rem;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-}
-
-.tool-rating {
-    display: flex;
-    gap: 2px;
-}
-
-.tool-rating i {
-    color: #ffd700;
-    font-size: 0.9rem;
-}
-
-.tool-card-enhanced p {
-    color: #555;
-    margin-bottom: 1rem;
-    font-size: 0.95rem;
-    line-height: 1.5;
-}
-
-.tool-tags {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    margin-top: 1rem;
-}
-
-.tool-tag {
-    background: rgba(78, 84, 200, 0.1);
-    color: #4e54c8;
-    padding: 4px 10px;
-    border-radius: 15px;
-    font-size: 0.75rem;
-    font-weight: 500;
-}
-`;
-
-// Comment System CSS
-const commentSystemCSS = `
-.comment-section {
-    margin-top: 2rem;
-    padding: 1.5rem;
-    background: white;
-    border-radius: 12px;
-    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-}
-
-.comment-section h2 {
-    color: #4e54c8;
-    margin-bottom: 1.5rem;
-    font-size: 1.5rem;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-}
-
-.comment-form {
-    background: #f8f9fa;
-    padding: 1.5rem;
-    border-radius: 10px;
-    margin-bottom: 2rem;
-}
-
-.comment-form h3 {
-    color: #2d334a;
-    margin-bottom: 1rem;
-    font-size: 1.2rem;
-}
-
-.form-group {
-    margin-bottom: 1rem;
-}
-
-.form-group label {
-    display: block;
-    margin-bottom: 0.5rem;
-    color: #555;
-    font-weight: 500;
-}
-
-.form-group input,
-.form-group textarea {
-    width: 100%;
-    padding: 12px;
-    border: 1px solid #ddd;
-    border-radius: 8px;
-    font-size: 1rem;
-    transition: all 0.3s ease;
-}
-
-.form-group input:focus,
-.form-group textarea:focus {
-    outline: none;
-    border-color: #4e54c8;
-    box-shadow: 0 0 0 3px rgba(78, 84, 200, 0.1);
-}
-
-.form-group textarea {
-    min-height: 120px;
-    resize: vertical;
-    font-family: inherit;
-}
-
-.comment-submit-btn {
-    background: linear-gradient(135deg, #4e54c8 0%, #8f94fb 100%);
-    color: white;
-    border: none;
-    padding: 12px 24px;
-    border-radius: 8px;
-    font-size: 1rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.3s ease;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.comment-submit-btn:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(78, 84, 200, 0.3);
-}
-
-.comments-list {
-    margin-top: 2rem;
-}
-
-.comment-item {
-    background: white;
-    border: 1px solid #e9ecef;
-    border-radius: 10px;
-    padding: 1.5rem;
-    margin-bottom: 1rem;
-    transition: all 0.3s ease;
-}
-
-.comment-item:hover {
-    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-    transform: translateY(-2px);
-}
-
-.comment-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    margin-bottom: 1rem;
-    flex-wrap: wrap;
-    gap: 1rem;
-}
-
-.comment-author {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-}
-
-.comment-avatar {
-    width: 40px;
-    height: 40px;
-    border-radius: 50%;
-    background: linear-gradient(135deg, #4e54c8 0%, #8f94fb 100%);
-    color: white;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: bold;
-    font-size: 1.1rem;
-}
-
-.comment-author-info h4 {
-    margin: 0;
-    color: #2d334a;
-    font-size: 1.1rem;
-}
-
-.comment-author-info .comment-date {
-    color: #666;
-    font-size: 0.85rem;
-    margin-top: 0.25rem;
-}
-
-.comment-actions {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-}
-
-.like-comment-btn {
-    background: none;
-    border: 1px solid #e9ecef;
-    color: #666;
-    padding: 6px 12px;
-    border-radius: 6px;
-    cursor: pointer;
-    transition: all 0.3s ease;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 0.9rem;
-}
-
-.like-comment-btn:hover {
-    border-color: #4e54c8;
-    color: #4e54c8;
-}
-
-.like-comment-btn.liked {
-    background: #ffeaea;
-    border-color: #ff6b6b;
-    color: #ff6b6b;
-}
-
-.comment-content {
-    color: #2d334a;
-    line-height: 1.6;
-    margin: 0;
-    white-space: pre-wrap;
-    word-wrap: break-word;
-}
-
-.comment-stats {
-    display: flex;
-    gap: 1rem;
-    margin-top: 1rem;
-    color: #666;
-    font-size: 0.9rem;
-}
-
-.load-more-comments {
-    text-align: center;
-    margin-top: 2rem;
-}
-
-.load-more-btn {
-    background: #f8f9fa;
-    border: 2px solid #4e54c8;
-    color: #4e54c8;
-    padding: 10px 20px;
-    border-radius: 8px;
-    cursor: pointer;
-    font-weight: 600;
-    transition: all 0.3s ease;
-}
-
-.load-more-btn:hover {
-    background: #4e54c8;
-    color: white;
-}
-
-.no-comments {
-    text-align: center;
-    padding: 3rem;
-    color: #666;
-    background: #f8f9fa;
-    border-radius: 10px;
-    border: 2px dashed #ddd;
-}
-
-@media (max-width: 768px) {
-    .comment-section {
-        padding: 1rem;
-    }
-    
-    .comment-header {
-        flex-direction: column;
-        gap: 0.75rem;
-    }
-    
-    .comment-author {
-        width: 100%;
-    }
-    
-    .comment-actions {
-        width: 100%;
-        justify-content: flex-end;
-    }
-    
-    .comment-item {
-        padding: 1rem;
-    }
-    
-    .comment-form {
-        padding: 1rem;
-    }
-}
-`;
-
-// Mini Browser HTML
-const miniBrowserHTML = `
-<div class="mini-browser-container" id="miniBrowser">
-    <div class="mini-browser-header" id="miniBrowserHeader">
-        <div class="mini-browser-title">
-            <i class="fas fa-compact-disc"></i> <span class="title-text">Quick Unique Best Match</span>
-        </div>
-        <div class="mini-browser-controls">
-            <button class="mini-browser-btn" onclick="refreshMiniBrowser()" title="Refresh">
-                <i class="fas fa-redo"></i>
-            </button>
-            <button class="mini-browser-btn" onclick="toggleMiniBrowserSize()" title="Expand/Collapse">
-                <i class="fas fa-expand"></i>
-            </button>
-            <button class="mini-browser-btn" onclick="closeMiniBrowser()" title="Close">
-                <i class="fas fa-times"></i>
-            </button>
-        </div>
-    </div>
-    <div class="mini-browser-content">
-        <div class="mini-browser-loading" id="miniBrowserLoading">
-            <div class="spinner"></div>
-            <div>Loading tools prompt...</div>
-        </div>
-        <iframe 
-            src="https://www.toolsprompt.com" 
-            class="mini-browser-iframe" 
-            id="miniBrowserIframe"
-            onload="hideMiniBrowserLoading()"
-            allow="fullscreen"
-            referrerpolicy="strict-origin-when-cross-origin"
-            sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"
-        ></iframe>
-    </div>
-</div>
-
-<button class="mini-browser-toggle" id="miniBrowserToggle" onclick="toggleMiniBrowser()">
-    <i class="fas fa-plus"></i>
-</button>
-`;
-
-// Mini Browser JavaScript
-const miniBrowserJS = `
-let isMiniBrowserOpen = false;
-let isMiniBrowserExpanded = false;
-let isDragging = false;
-let dragOffset = { x: 0, y: 0 };
-
-function autoOpenMiniBrowser() {
-    console.log('Auto-opening mini browser...');
-    
-    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-    
-    setTimeout(() => {
-        if (!isMobile || window.innerWidth > 480) {
-            toggleMiniBrowser();
-        } else {
-            console.log('Mobile device detected - mini browser auto-open disabled');
-            showMobileNotification();
-        }
-    }, 1500);
-}
-
-function showMobileNotification() {
-    const notification = document.createElement('div');
-    notification.innerHTML = \`
-        <div style="
-            position: fixed;
-            bottom: 60px;
-            right: 10px;
-            background: #4e54c8;
-            color: white;
-            padding: 8px 12px;
-            border-radius: 8px;
-            font-size: 0.8rem;
-            z-index: 10001;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
-            max-width: 150px;
-        ">
-            <i class="fas fa-compass"></i> Quick Browser Available
-            <br>
-            <small>Tap the + button</small>
-        </div>
-    \`;
-    document.body.appendChild(notification);
-    
-    setTimeout(() => {
-        if (notification.parentNode) {
-            notification.parentNode.removeChild(notification);
-        }
-    }, 3000);
-}
-
-function toggleMiniBrowser() {
-    console.log('Toggle mini browser called');
-    const miniBrowser = document.getElementById('miniBrowser');
-    const toggleBtn = document.getElementById('miniBrowserToggle');
-    
-    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-    
-    if (!isMiniBrowserOpen) {
-        miniBrowser.style.display = 'flex';
-        toggleBtn.innerHTML = '<i class="fas fa-times"></i>';
-        toggleBtn.style.background = '#ff6b6b';
-        isMiniBrowserOpen = true;
-        
-        if (isMobile && window.innerWidth <= 480) {
-            miniBrowser.style.width = '250px';
-            miniBrowser.style.height = '300px';
-        }
-        
-        showMiniBrowserLoading();
-        
-        const iframe = document.getElementById('miniBrowserIframe');
-        iframe.src = 'https://www.toolsprompt.com';
-    } else {
-        closeMiniBrowser();
-    }
-}
-
-function closeMiniBrowser() {
-    const miniBrowser = document.getElementById('miniBrowser');
-    const toggleBtn = document.getElementById('miniBrowserToggle');
-    
-    miniBrowser.style.display = 'none';
-    toggleBtn.innerHTML = '<i class="fas fa-plus"></i>';
-    toggleBtn.style.background = '#4e54c8';
-    isMiniBrowserOpen = false;
-    isMiniBrowserExpanded = false;
-    miniBrowser.classList.remove('expanded');
-    
-    const expandBtn = document.querySelector('.mini-browser-btn .fa-expand, .mini-browser-btn .fa-compress');
-    if (expandBtn) {
-        expandBtn.className = 'fas fa-expand';
-    }
-}
-
-function toggleMiniBrowserSize() {
-    const miniBrowser = document.getElementById('miniBrowser');
-    const expandBtn = document.querySelector('.mini-browser-controls .fa-expand, .mini-browser-controls .fa-compress');
-    
-    if (!isMiniBrowserExpanded) {
-        miniBrowser.classList.add('expanded');
-        if (expandBtn) expandBtn.className = 'fas fa-compress';
-        isMiniBrowserExpanded = true;
-    } else {
-        miniBrowser.classList.remove('expanded');
-        if (expandBtn) expandBtn.className = 'fas fa-expand';
-        isMiniBrowserExpanded = false;
-    }
-}
-
-function refreshMiniBrowser() {
-    const iframe = document.getElementById('miniBrowserIframe');
-    showMiniBrowserLoading();
-    iframe.src = 'https://www.toolsprompt.com';
-}
-
-function showMiniBrowserLoading() {
-    const loading = document.getElementById('miniBrowserLoading');
-    if (loading) loading.style.display = 'block';
-}
-
-function hideMiniBrowserLoading() {
-    const loading = document.getElementById('miniBrowserLoading');
-    if (loading) loading.style.display = 'none';
-}
-
-function initializeDragging() {
-    const header = document.getElementById('miniBrowserHeader');
-    const browser = document.getElementById('miniBrowser');
-    
-    if (!header || !browser) return;
-    
-    header.addEventListener('mousedown', startDrag);
-    header.addEventListener('touchstart', startDragTouch);
-    
-    function startDrag(e) {
-        if (isMiniBrowserExpanded) return;
-        
-        isDragging = true;
-        const rect = browser.getBoundingClientRect();
-        dragOffset.x = e.clientX - rect.left;
-        dragOffset.y = e.clientY - rect.top;
-        
-        document.addEventListener('mousemove', onDrag);
-        document.addEventListener('mouseup', stopDrag);
-        e.preventDefault();
-    }
-    
-    function startDragTouch(e) {
-        if (isMiniBrowserExpanded) return;
-        
-        isDragging = true;
-        const touch = e.touches[0];
-        const rect = browser.getBoundingClientRect();
-        dragOffset.x = touch.clientX - rect.left;
-        dragOffset.y = touch.clientY - rect.top;
-        
-        document.addEventListener('touchmove', onDragTouch);
-        document.addEventListener('touchend', stopDrag);
-        e.preventDefault();
-    }
-    
-    function onDrag(e) {
-        if (!isDragging) return;
-        
-        browser.style.position = 'fixed';
-        browser.style.left = (e.clientX - dragOffset.x) + 'px';
-        browser.style.top = (e.clientY - dragOffset.y) + 'px';
-        browser.style.right = 'auto';
-        browser.style.bottom = 'auto';
-    }
-    
-    function onDragTouch(e) {
-        if (!isDragging) return;
-        
-        const touch = e.touches[0];
-        browser.style.position = 'fixed';
-        browser.style.left = (touch.clientX - dragOffset.x) + 'px';
-        browser.style.top = (touch.clientY - dragOffset.y) + 'px';
-        browser.style.right = 'auto';
-        browser.style.bottom = 'auto';
-    }
-    
-    function stopDrag() {
-        isDragging = false;
-        document.removeEventListener('mousemove', onDrag);
-        document.removeEventListener('touchmove', onDragTouch);
-        document.removeEventListener('mouseup', stopDrag);
-        document.removeEventListener('touchend', stopDrag);
-    }
-}
-
-document.addEventListener('click', function(e) {
-    const miniBrowser = document.getElementById('miniBrowser');
-    const toggleBtn = document.getElementById('miniBrowserToggle');
-    
-    if (isMiniBrowserOpen && !isMiniBrowserExpanded && 
-        miniBrowser && !miniBrowser.contains(e.target) && 
-        e.target !== toggleBtn) {
-        closeMiniBrowser();
-    }
-});
-
-window.addEventListener('message', function(e) {
-    console.log('Message from iframe:', e.data);
-});
-
-document.addEventListener('DOMContentLoaded', function() {
-    console.log('DOM loaded, initializing mini browser');
-    initializeDragging();
-    autoOpenMiniBrowser();
-});
-
-document.addEventListener('keydown', function(e) {
-    if ((e.ctrlKey || e.metaKey) && e.key === 'b') {
-        e.preventDefault();
-        toggleMiniBrowser();
-    }
-    
-    if (e.key === 'Escape' && isMiniBrowserOpen) {
-        if (isMiniBrowserExpanded) {
-            toggleMiniBrowserSize();
-        } else {
-            closeMiniBrowser();
-        }
-    }
-});
-`;
-
-// Mini Browser Toggle Button
-const miniBrowserToggleButton = `
-<button class="engagement-btn" onclick="toggleMiniBrowser()" title="Open tools prompt Browser (Ctrl+B)">
-    <i class="fas fa-external-link-alt"></i> Quick Browse
-</button>
-`;
-
-// Comment System JavaScript
-function generateCommentSystemJS(promptData) {
-  return `
-let currentPage = 1;
-let isLoadingComments = false;
-let hasMoreComments = true;
-
-async function loadComments(page = 1) {
-    if (isLoadingComments) return;
-    
-    isLoadingComments = true;
-    const promptId = '${promptData.id}';
-    const commentsList = document.getElementById('commentsList');
-    const noComments = document.getElementById('noComments');
-    const loadMoreDiv = document.getElementById('loadMoreComments');
-    
-    try {
-        const response = await fetch('/api/prompt/' + promptId + '/comments?page=' + page + '&limit=10');
-        if (!response.ok) throw new Error('Failed to load comments');
-        
-        const data = await response.json();
-        
-        if (page === 1) {
-            commentsList.innerHTML = '';
-            noComments.style.display = 'none';
-        }
-        
-        if (data.comments && data.comments.length > 0) {
-            data.comments.forEach(comment => {
-                const commentElement = createCommentElement(comment);
-                commentsList.appendChild(commentElement);
-            });
-            
-            hasMoreComments = data.hasMore;
-            loadMoreDiv.style.display = hasMoreComments ? 'block' : 'none';
-            
-            if (page === 1 && data.totalCount > 0) {
-                const commentCount = document.querySelector('.comment-count');
-                if (commentCount) {
-                    commentCount.textContent = data.totalCount;
-                }
-            }
-        } else if (page === 1) {
-            noComments.style.display = 'block';
-            loadMoreDiv.style.display = 'none';
-        }
-        
-        currentPage = page;
-    } catch (error) {
-        console.error('Error loading comments:', error);
-        if (page === 1) {
-            noComments.innerHTML = '<p>Error loading comments. Please try again.</p>';
-            noComments.style.display = 'block';
-        }
-    } finally {
-        isLoadingComments = false;
-    }
-}
-
-function createCommentElement(comment) {
-    const commentDate = new Date(comment.createdAt);
-    const formattedDate = commentDate.toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit'
+// ==================== CHANNEL SYSTEM ====================
+app.post('/api/channel', async (req, res) => {
+  try {
+    const busboy = Busboy({ headers: req.headers, limits: { fileSize: 5 * 1024 * 1024 } });
+    let fields = {};
+    let bannerBuffer = null;
+    let avatarBuffer = null;
+    let bannerMimeType = null;
+    let avatarMimeType = null;
+    let uploadError = null;
+
+    busboy.on('field', (fieldname, val) => { fields[fieldname] = val; });
+
+    busboy.on('file', (fieldname, file, info) => {
+      const { filename, mimeType } = info;
+      if (fieldname === 'banner') {
+        const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+        if (!allowedTypes.includes(mimeType)) { uploadError = new Error('Invalid banner type. Allowed: JPEG, PNG, WebP'); return; }
+        bannerMimeType = mimeType;
+        const chunks = [];
+        file.on('data', (data) => chunks.push(data));
+        file.on('end', () => {
+          bannerBuffer = Buffer.concat(chunks);
+          if (bannerBuffer.length > 5 * 1024 * 1024) uploadError = new Error('Banner size exceeds 5MB limit');
+        });
+      } else if (fieldname === 'avatar') {
+        const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+        if (!allowedTypes.includes(mimeType)) { uploadError = new Error('Invalid avatar type. Allowed: JPEG, PNG, WebP'); return; }
+        avatarMimeType = mimeType;
+        const chunks = [];
+        file.on('data', (data) => chunks.push(data));
+        file.on('end', () => {
+          avatarBuffer = Buffer.concat(chunks);
+          if (avatarBuffer.length > 2 * 1024 * 1024) uploadError = new Error('Avatar size exceeds 2MB limit');
+        });
+      } else {
+        file.resume();
+      }
     });
-    
-    const avatarLetter = comment.authorName.charAt(0).toUpperCase();
-    
-    const element = document.createElement('div');
-    element.className = 'comment-item';
-    element.id = 'comment-' + comment.id;
-    element.innerHTML = 
-        '<div class="comment-header">' +
-            '<div class="comment-author">' +
-                '<div class="comment-avatar">' +
-                    avatarLetter +
-                '</div>' +
-                '<div class="comment-author-info">' +
-                    '<h4>' + comment.authorName + '</h4>' +
-                    '<div class="comment-date">' +
-                        '<i class="far fa-clock"></i> ' + formattedDate +
-                    '</div>' +
-                '</div>' +
-            '</div>' +
-            '<div class="comment-actions">' +
-                '<button class="like-comment-btn" ' +
-                        'onclick="likeComment(\\'' + comment.id + '\\')"' +
-                        'data-likes="' + (comment.likes || 0) + '">' +
-                    '<i class="far fa-heart"></i>' +
-                    '<span class="like-count">' + (comment.likes || 0) + '</span>' +
-                '</button>' +
-            '</div>' +
-        '</div>' +
-        '<p class="comment-content">' + comment.content + '</p>';
-    
-    return element;
-}
 
-document.getElementById('commentForm').addEventListener('submit', async function(e) {
-    e.preventDefault();
-    
-    const promptId = '${promptData.id}';
-    const form = e.target;
-    const submitBtn = form.querySelector('button[type="submit"]');
-    const originalBtnText = submitBtn.innerHTML;
-    
-    const formData = {
-        content: form.content.value.trim(),
-        authorName: form.authorName.value.trim() || 'Anonymous',
-        authorEmail: form.authorEmail.value.trim() || null
-    };
-    
-    if (!formData.content) {
-        alert('Please enter a comment');
-        return;
-    }
-    
-    submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Posting...';
-    submitBtn.disabled = true;
-    
-    try {
-        const response = await fetch('/api/prompt/' + promptId + '/comments', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(formData)
-        });
-        
-        const result = await response.json();
-        
-        if (result.success) {
-            form.reset();
-            alert('Comment posted successfully!');
-            loadComments(1);
-            document.getElementById('commentSection').scrollIntoView({ 
-                behavior: 'smooth' 
-            });
+    busboy.on('finish', async () => {
+      try {
+        if (uploadError) return res.status(400).json({ error: uploadError.message });
+
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Authentication required' });
+        const idToken = authHeader.split('Bearer ')[1];
+        const decodedToken = await admin.auth().verifyIdToken(idToken);
+        const userId = decodedToken.uid;
+
+        const { channelName, channelHandle: providedHandle, description, customUrl } = fields;
+        if (!channelName || channelName.trim().length < 3) return res.status(400).json({ error: 'Channel name must be at least 3 characters' });
+
+        let existingChannel = null;
+        let channelDocId = null;
+        let existingHandle = null;
+
+        if (db && db.collection) {
+          const snapshot = await db.collection('channels').where('userId', '==', userId).limit(1).get();
+          if (!snapshot.empty) {
+            channelDocId = snapshot.docs[0].id;
+            existingChannel = snapshot.docs[0].data();
+            existingHandle = existingChannel.channelHandle;
+          }
+        }
+
+        let bannerUrl = existingChannel?.bannerUrl || null;
+        let avatarUrl = existingChannel?.avatarUrl || null;
+
+        if (bannerBuffer && bannerMimeType) {
+          const timestamp = Date.now();
+          const uniqueId = uuidv4();
+          const ext = bannerMimeType.split('/')[1] || 'jpg';
+          const key = `channel_banners/${userId}-${timestamp}-${uniqueId}.${ext}`;
+          bannerUrl = await uploadToR2(bannerBuffer, key, bannerMimeType);
+          console.log(`✅ Channel banner uploaded: ${bannerUrl}`);
+        }
+
+        if (avatarBuffer && avatarMimeType) {
+          const timestamp = Date.now();
+          const uniqueId = uuidv4();
+          const ext = avatarMimeType.split('/')[1] || 'jpg';
+          const key = `channel_avatars/${userId}-${timestamp}-${uniqueId}.${ext}`;
+          avatarUrl = await uploadToR2(avatarBuffer, key, avatarMimeType);
+          console.log(`✅ Channel avatar uploaded: ${avatarUrl}`);
+        }
+
+        let channelHandle;
+        let isNew = false;
+
+        if (existingChannel) {
+          channelHandle = existingHandle;
+          console.log(`🔄 Updating channel ${channelDocId}, preserving handle: ${channelHandle}`);
         } else {
-            alert(result.error || 'Failed to post comment');
+          isNew = true;
+          let baseHandle = providedHandle
+            ? providedHandle.toLowerCase().replace(/[^a-z0-9]/g, '').substring(0, 20)
+            : channelName.toLowerCase().replace(/[^a-z0-9]/g, '').substring(0, 20);
+          if (!baseHandle) baseHandle = 'channel' + Date.now().toString().substring(0, 6);
+          channelHandle = '@' + baseHandle;
+          let isUnique = false;
+          let attempts = 0;
+          while (!isUnique && attempts < 10) {
+            attempts++;
+            if (db && db.collection) {
+              const handleCheck = await db.collection('channels').where('channelHandle', '==', channelHandle).get();
+              if (handleCheck.empty) isUnique = true;
+              else channelHandle = '@' + baseHandle + attempts;
+            } else {
+              isUnique = true;
+            }
+          }
+          console.log(`🆕 Creating channel with new handle: ${channelHandle}`);
         }
-    } catch (error) {
-        console.error('Error posting comment:', error);
-        alert('Failed to post comment. Please try again.');
-    } finally {
-        submitBtn.innerHTML = originalBtnText;
-        submitBtn.disabled = false;
-    }
+
+        const channelData = {
+          userId,
+          channelName: channelName.trim(),
+          channelHandle,
+          description: description || '',
+          updatedAt: new Date().toISOString(),
+          subscribers: existingChannel?.subscribers || 0,
+          subscriberIds: existingChannel?.subscriberIds || [],
+          totalViews: existingChannel?.totalViews || 0,
+          totalPrompts: existingChannel?.totalPrompts || 0,
+          isVerified: existingChannel?.isVerified || false
+        };
+
+        if (bannerUrl) channelData.bannerUrl = bannerUrl;
+        if (avatarUrl) channelData.avatarUrl = avatarUrl;
+        if (!bannerUrl && existingChannel?.bannerUrl) channelData.bannerUrl = existingChannel.bannerUrl;
+        if (!avatarUrl && existingChannel?.avatarUrl) channelData.avatarUrl = existingChannel.avatarUrl;
+
+        if (customUrl && customUrl.trim()) {
+          const cleanCustomUrl = customUrl.trim().toLowerCase().replace(/[^a-z0-9-]/g, '').replace(/-+/g, '-').substring(0, 30);
+          if (cleanCustomUrl) {
+            if (db && db.collection) {
+              const urlCheck = await db.collection('channels').where('customUrl', '==', cleanCustomUrl).get();
+              if (!urlCheck.empty) {
+                const existingDoc = urlCheck.docs[0];
+                if (existingDoc.id !== channelDocId) return res.status(400).json({ error: 'Custom URL already taken. Please choose another.' });
+              }
+            }
+            channelData.customUrl = cleanCustomUrl;
+          }
+        } else if (existingChannel?.customUrl) {
+          channelData.customUrl = existingChannel.customUrl;
+        }
+
+        let channelId;
+        if (db && db.collection) {
+          if (channelDocId) {
+            await db.collection('channels').doc(channelDocId).update(channelData);
+            channelId = channelDocId;
+            console.log(`✅ Channel updated: ${channelHandle}`);
+          } else {
+            channelData.createdAt = new Date().toISOString();
+            const docRef = await db.collection('channels').add(channelData);
+            channelId = docRef.id;
+            isNew = true;
+            console.log(`✅ Channel created: ${channelHandle}`);
+          }
+        } else {
+          channelId = 'channel_' + Date.now();
+          if (!global.channels) global.channels = {};
+          global.channels[channelId] = { id: channelId, ...channelData };
+        }
+
+        if (db && db.collection) {
+          await db.collection('users').doc(userId).set({ channelId, channelHandle, hasChannel: true }, { merge: true });
+        }
+
+        res.json({ success: true, channelId, channelHandle, isNew, channel: channelData });
+      } catch (error) {
+        console.error('Channel creation error:', error);
+        res.status(500).json({ error: 'Failed to create/update channel: ' + error.message });
+      }
+    });
+
+    busboy.on('error', (err) => {
+      console.error('Busboy error:', err);
+      res.status(500).json({ error: 'Request parsing error' });
+    });
+
+    req.pipe(busboy);
+  } catch (error) {
+    console.error('Channel API error:', error);
+    res.status(500).json({ error: 'Failed to process channel request' });
+  }
 });
 
-async function likeComment(commentId) {
-    const promptId = '${promptData.id}';
-    const likeBtn = document.querySelector('#comment-' + commentId + ' .like-comment-btn');
-    
-    if (likeBtn.classList.contains('liked')) {
-        return;
-    }
-    
-    try {
-        const response = await fetch('/api/comment/' + commentId + '/like', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ promptId })
-        });
-        
-        if (response.ok) {
-            likeBtn.classList.add('liked');
-            const likeCount = likeBtn.querySelector('.like-count');
-            const currentLikes = parseInt(likeCount.textContent);
-            likeCount.textContent = currentLikes + 1;
+app.get('/api/channel/:identifier', async (req, res) => {
+  try {
+    const identifier = req.params.identifier;
+    let channel = null;
+    let channelId = null;
+    if (db && db.collection) {
+      let query;
+      if (identifier.startsWith('@')) query = db.collection('channels').where('channelHandle', '==', identifier);
+      else if (identifier.startsWith('channel_')) query = db.collection('channels').where('__name__', '==', identifier);
+      else query = db.collection('channels').where('customUrl', '==', identifier);
+      const snapshot = await query.get();
+      if (!snapshot.empty) {
+        const doc = snapshot.docs[0];
+        channelId = doc.id;
+        channel = doc.data();
+      }
+    } else {
+      const channels = global.channels || {};
+      for (const [id, data] of Object.entries(channels)) {
+        if (data.channelHandle === identifier || id === identifier || data.customUrl === identifier) {
+          channelId = id;
+          channel = data;
+          break;
         }
-    } catch (error) {
-        console.error('Error liking comment:', error);
+      }
     }
+    if (!channel) return res.status(404).json({ error: 'Channel not found' });
+
+    let prompts = [];
+    if (db && db.collection) {
+      const promptSnapshot = await db.collection('uploads').where('userId', '==', channel.userId).orderBy('createdAt', 'desc').limit(50).get();
+      prompts = promptSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data(), createdAt: safeDateToString(doc.data().createdAt) }));
+    } else {
+      prompts = mockPrompts.filter(p => p.userId === channel.userId);
+    }
+
+    res.json({ success: true, channel: { id: channelId, ...channel }, prompts, promptCount: prompts.length });
+  } catch (error) {
+    console.error('Get channel error:', error);
+    res.status(500).json({ error: 'Failed to fetch channel' });
+  }
+});
+
+app.get('/api/channel/:channelId/supporters', async (req, res) => {
+  try {
+    const channelId = req.params.channelId;
+    const limit = parseInt(req.query.limit) || 10;
+    let supporters = [];
+    if (db && db.collection) {
+      const snapshot = await db.collection('channel_support').where('channelId', '==', channelId).limit(50).get();
+      supporters = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data(), createdAt: safeDateToString(doc.data().createdAt) })).sort((a, b) => (b.amount || 0) - (a.amount || 0)).slice(0, limit);
+    } else {
+      supporters = [{ supporterName: 'Demo User', amount: 50, message: 'Great content!', createdAt: new Date().toISOString() }];
+    }
+    res.json({ success: true, supporters });
+  } catch (error) {
+    console.error('Error fetching supporters:', error);
+    res.status(500).json({ error: 'Failed to fetch supporters' });
+  }
+});
+
+app.post('/api/channel/:channelId/support', async (req, res) => {
+  try {
+    const channelId = req.params.channelId;
+    const { amount, message, anonymous } = req.body;
+    if (!amount || amount < 10) return res.status(400).json({ error: 'Minimum support amount is ₹10' });
+
+    let channelData;
+    if (db && db.collection) {
+      const doc = await db.collection('channels').doc(channelId).get();
+      if (!doc.exists) return res.status(404).json({ error: 'Channel not found' });
+      channelData = doc.data();
+    } else {
+      channelData = { userId: 'mock-user', channelName: 'Demo Channel' };
+    }
+
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Authentication required' });
+    const idToken = authHeader.split('Bearer ')[1];
+    let userId;
+    try {
+      const decodedToken = await admin.auth().verifyIdToken(idToken);
+      userId = decodedToken.uid;
+    } catch (e) {
+      console.error('Token verification failed:', e);
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+
+    let order;
+    if (razorpay) {
+      order = await razorpay.orders.create({
+        amount: Math.round(amount * 100),
+        currency: 'INR',
+        notes: { channelId, userId, type: 'channel_support' }
+      });
+    } else {
+      order = { id: 'order_demo_' + Date.now(), amount: amount * 100, currency: 'INR' };
+    }
+
+    res.json({ success: true, orderId: order.id, amount: order.amount, currency: order.currency, isDemo: !razorpay, keyId: razorpayKeyId });
+  } catch (error) {
+    console.error('Support order error:', error);
+    res.status(500).json({ error: 'Failed to create support order' });
+  }
+});
+
+app.post('/api/channel/:channelId/support/verify', async (req, res) => {
+  try {
+    const channelId = req.params.channelId;
+    const { orderId, paymentId, signature, amount, message, anonymous } = req.body;
+
+    if (razorpay) {
+      const crypto = require('crypto');
+      const generatedSignature = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET).update(orderId + '|' + paymentId).digest('hex');
+      if (generatedSignature !== signature) return res.status(400).json({ error: 'Invalid payment signature' });
+    }
+
+    let channelData;
+    if (db && db.collection) {
+      const doc = await db.collection('channels').doc(channelId).get();
+      if (!doc.exists) return res.status(404).json({ error: 'Channel not found' });
+      channelData = doc.data();
+    } else {
+      channelData = { userId: 'mock-user', channelName: 'Demo Channel' };
+    }
+
+    const authHeader = req.headers.authorization;
+    let supporterId = 'anonymous';
+    let supporterName = 'Anonymous Supporter';
+    let supporterEmail = null;
+
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const idToken = authHeader.split('Bearer ')[1];
+      try {
+        const decoded = await admin.auth().verifyIdToken(idToken);
+        supporterId = decoded.uid;
+        supporterName = decoded.displayName || decoded.email || 'User';
+        supporterEmail = decoded.email || null;
+      } catch (err) {
+        console.warn('Could not verify token, using anonymous:', err.message);
+      }
+    }
+
+    const supportData = sanitizeFirestoreData({
+      channelId,
+      channelName: channelData.channelName || 'Channel',
+      userId: channelData.userId,
+      supporterId,
+      supporterName: anonymous ? 'Anonymous' : supporterName,
+      supporterEmail: anonymous ? null : supporterEmail,
+      amount,
+      message: message || '',
+      anonymous: anonymous || false,
+      platformFee: Math.round(amount * 0.15),
+      netAmount: Math.round(amount * 0.85),
+      razorpayOrderId: orderId,
+      razorpayPaymentId: paymentId,
+      createdAt: new Date().toISOString()
+    });
+
+    if (db && db.collection) {
+      await db.collection('channel_support').add(supportData);
+      await db.collection('channels').doc(channelId).update({
+        totalSupport: admin.firestore.FieldValue.increment(amount),
+        totalSupportCount: admin.firestore.FieldValue.increment(1),
+        updatedAt: new Date().toISOString()
+      });
+      await db.collection('sales').add({
+        promptId: null,
+        promptTitle: `Channel Support: ${channelData.channelName}`,
+        buyerId: supporterId,
+        buyerName: anonymous ? 'Anonymous' : supporterName,
+        buyerEmail: supporterEmail || null,
+        sellerId: channelData.userId,
+        sellerName: channelData.channelName || 'Channel Owner',
+        amount,
+        sellerEarnings: Math.round(amount * 0.85),
+        platformFee: Math.round(amount * 0.15),
+        createdAt: new Date().toISOString(),
+        paymentStatus: 'completed',
+        type: 'channel_support'
+      });
+    } else {
+      console.log('Support recorded (demo):', supportData);
+    }
+
+    res.json({ success: true, message: 'Support successful!' });
+  } catch (error) {
+    console.error('Support verification error:', error);
+    res.status(500).json({ error: 'Failed to verify support', details: error.message });
+  }
+});
+
+app.get('/api/my-channel', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Authentication required' });
+    const idToken = authHeader.split('Bearer ')[1];
+    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    const userId = decodedToken.uid;
+
+    let channel = null;
+    let channelId = null;
+
+    if (db && db.collection) {
+      const snapshot = await db.collection('channels').where('userId', '==', userId).limit(1).get();
+      if (!snapshot.empty) {
+        const doc = snapshot.docs[0];
+        channelId = doc.id;
+        channel = doc.data();
+      }
+    } else {
+      const channels = global.channels || {};
+      for (const [id, data] of Object.entries(channels)) {
+        if (data.userId === userId) { channelId = id; channel = data; break; }
+      }
+    }
+
+    res.json({ success: true, hasChannel: !!channel, channelId, channel });
+  } catch (error) {
+    console.error('Get my channel error:', error);
+    res.status(500).json({ error: 'Failed to fetch channel' });
+  }
+});
+
+app.get('/api/channel-exists/:userId', async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    let hasChannel = false;
+    let channelHandle = null;
+    let channelId = null;
+    let customUrl = null;
+
+    if (db && db.collection) {
+      const snapshot = await db.collection('channels').where('userId', '==', userId).limit(1).get();
+      if (!snapshot.empty) {
+        const doc = snapshot.docs[0];
+        hasChannel = true;
+        channelHandle = doc.data().channelHandle;
+        channelId = doc.id;
+        customUrl = doc.data().customUrl;
+      }
+    } else {
+      const channels = global.channels || {};
+      for (const [id, data] of Object.entries(channels)) {
+        if (data.userId === userId) {
+          hasChannel = true;
+          channelHandle = data.channelHandle;
+          channelId = id;
+          customUrl = data.customUrl;
+          break;
+        }
+      }
+    }
+
+    res.json({ success: true, hasChannel, channelHandle, channelId, customUrl });
+  } catch (error) {
+    console.error('Check channel exists error:', error);
+    res.status(500).json({ error: 'Failed to check channel' });
+  }
+});
+
+app.post('/api/channel/:channelId/subscribe', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Authentication required' });
+    const idToken = authHeader.split('Bearer ')[1];
+    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    const userId = decodedToken.uid;
+    const channelId = req.params.channelId;
+    const { action } = req.body;
+
+    if (!db || !db.collection) return res.json({ success: true, message: 'Demo mode' });
+
+    const channelRef = db.collection('channels').doc(channelId);
+    const channelDoc = await channelRef.get();
+    if (!channelDoc.exists) return res.status(404).json({ error: 'Channel not found' });
+
+    const channelData = channelDoc.data();
+    const subscriberIds = channelData.subscriberIds || [];
+    const isSubscribed = subscriberIds.includes(userId);
+
+    if (action === 'subscribe' && !isSubscribed) {
+      subscriberIds.push(userId);
+      await channelRef.update({ subscriberIds, subscribers: subscriberIds.length, updatedAt: new Date().toISOString() });
+      await db.collection('users').doc(userId).set({ subscriptions: admin.firestore.FieldValue.arrayUnion(channelId) }, { merge: true });
+      res.json({ success: true, subscribed: true, subscribers: subscriberIds.length });
+    } else if (action === 'unsubscribe' && isSubscribed) {
+      const index = subscriberIds.indexOf(userId);
+      if (index > -1) subscriberIds.splice(index, 1);
+      await channelRef.update({ subscriberIds, subscribers: subscriberIds.length, updatedAt: new Date().toISOString() });
+      await db.collection('users').doc(userId).set({ subscriptions: admin.firestore.FieldValue.arrayRemove(channelId) }, { merge: true });
+      res.json({ success: true, subscribed: false, subscribers: subscriberIds.length });
+    } else {
+      res.json({ success: true, subscribed: isSubscribed, subscribers: subscriberIds.length });
+    }
+  } catch (error) {
+    console.error('Subscribe error:', error);
+    res.status(500).json({ error: 'Failed to update subscription' });
+  }
+});
+
+app.get('/api/my-subscriptions', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Authentication required' });
+    const idToken = authHeader.split('Bearer ')[1];
+    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    const userId = decodedToken.uid;
+
+    let subscriptions = [];
+    if (db && db.collection) {
+      const userDoc = await db.collection('users').doc(userId).get();
+      if (userDoc.exists) {
+        const userData = userDoc.data();
+        const subscriptionIds = userData.subscriptions || [];
+        if (subscriptionIds.length > 0) {
+          const channelsSnapshot = await db.collection('channels').where(admin.firestore.FieldPath.documentId(), 'in', subscriptionIds.slice(0, 10)).get();
+          subscriptions = channelsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        }
+      }
+    }
+
+    res.json({ success: true, subscriptions });
+  } catch (error) {
+    console.error('Get subscriptions error:', error);
+    res.status(500).json({ error: 'Failed to fetch subscriptions' });
+  }
+});
+
+app.get('/api/channel/:channelId/subscription-status', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.json({ isSubscribed: false });
+    const idToken = authHeader.split('Bearer ')[1];
+    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    const userId = decodedToken.uid;
+    const channelId = req.params.channelId;
+
+    let isSubscribed = false;
+    let subscribers = 0;
+    if (db && db.collection) {
+      const channelDoc = await db.collection('channels').doc(channelId).get();
+      if (channelDoc.exists) {
+        const data = channelDoc.data();
+        subscribers = data.subscribers || 0;
+        isSubscribed = (data.subscriberIds || []).includes(userId);
+      }
+    }
+    res.json({ success: true, isSubscribed, subscribers });
+  } catch (error) {
+    console.error('Subscription status error:', error);
+    res.json({ isSubscribed: false, subscribers: 0 });
+  }
+});
+
+// ==================== CHANNEL COMMUNITY API (NEW) ====================
+
+// Create community post (owner only)
+app.post('/api/channel/:channelId/community', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+    const idToken = authHeader.split('Bearer ')[1];
+    let userId;
+    try {
+      const decodedToken = await admin.auth().verifyIdToken(idToken);
+      userId = decodedToken.uid;
+    } catch (e) {
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+
+    const channelId = req.params.channelId;
+    let channelData;
+    if (db && db.collection) {
+      const channelDoc = await db.collection('channels').doc(channelId).get();
+      if (!channelDoc.exists) return res.status(404).json({ error: 'Channel not found' });
+      channelData = channelDoc.data();
+    } else {
+      channelData = { userId: 'mock-user', channelName: 'Demo Channel' };
+    }
+
+    if (channelData.userId !== userId) {
+      return res.status(403).json({ error: 'Only channel owner can post' });
+    }
+
+    const busboy = Busboy({ headers: req.headers, limits: { fileSize: 10 * 1024 * 1024 } });
+    const fields = {};
+    let imageBuffer = null;
+    let imageMimeType = null;
+
+    busboy.on('field', (fieldname, val) => { fields[fieldname] = val; });
+    busboy.on('file', (fieldname, file, info) => {
+      if (fieldname === 'image') {
+        const allowed = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif'];
+        if (!allowed.includes(info.mimeType)) { file.resume(); return; }
+        imageMimeType = info.mimeType;
+        const chunks = [];
+        file.on('data', (c) => chunks.push(c));
+        file.on('end', () => { imageBuffer = Buffer.concat(chunks); });
+      } else { file.resume(); }
+    });
+
+    busboy.on('finish', async () => {
+      try {
+        const text = (fields.text || '').trim();
+        const promptText = (fields.promptText || '').trim();
+
+        if (!text && !promptText && !imageBuffer) {
+          return res.status(400).json({ error: 'Post must have text, prompt, or image' });
+        }
+
+        let imageUrl = null;
+        if (imageBuffer && imageMimeType) {
+          const timestamp = Date.now();
+          const uniqueId = uuidv4();
+          const ext = imageMimeType.split('/')[1] || 'jpg';
+          const key = `community_posts/${channelId}-${timestamp}-${uniqueId}.${ext}`;
+          imageUrl = await uploadToR2(imageBuffer, key, imageMimeType);
+        }
+
+        const postData = sanitizeFirestoreData({
+          channelId,
+          channelName: channelData.channelName || 'Channel',
+          userId,
+          userName: channelData.channelName || 'Channel Owner',
+          userAvatar: channelData.avatarUrl || null,
+          text,
+          promptText,
+          imageUrl,
+          reactions: {},
+          commentCount: 0,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        });
+
+        let postId;
+        if (db && db.collection) {
+          const docRef = await db.collection('community_posts').add(postData);
+          postId = docRef.id;
+        } else {
+          postId = 'post_' + Date.now();
+          if (!global.communityPosts) global.communityPosts = {};
+          if (!global.communityPosts[channelId]) global.communityPosts[channelId] = [];
+          global.communityPosts[channelId].unshift({ id: postId, ...postData });
+        }
+
+        res.json({ success: true, postId, post: { id: postId, ...postData } });
+      } catch (err) {
+        console.error('Community post error:', err);
+        res.status(500).json({ error: 'Failed to create post' });
+      }
+    });
+
+    req.pipe(busboy);
+  } catch (error) {
+    console.error('Community post error:', error);
+    res.status(500).json({ error: 'Failed to create post' });
+  }
+});
+
+// Get community posts
+app.get('/api/channel/:channelId/community', async (req, res) => {
+  try {
+    const channelId = req.params.channelId;
+    const limit = parseInt(req.query.limit) || 20;
+    let posts = [];
+
+    if (db && db.collection) {
+      const snapshot = await db.collection('community_posts')
+        .where('channelId', '==', channelId)
+        .orderBy('createdAt', 'desc')
+        .limit(limit)
+        .get();
+      posts = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+      for (const post of posts) {
+        try {
+          const countSnapshot = await db.collection('community_comments')
+            .where('postId', '==', post.id).get();
+          post.commentCount = countSnapshot.size;
+        } catch (e) { /* ignore */ }
+      }
+    } else {
+      posts = (global.communityPosts?.[channelId] || []).slice(0, limit);
+    }
+
+    res.json({ success: true, posts });
+  } catch (error) {
+    console.error('Get community posts error:', error);
+    res.status(500).json({ error: 'Failed to fetch posts' });
+  }
+});
+
+// Delete community post (owner only)
+app.delete('/api/community/:postId', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+    const idToken = authHeader.split('Bearer ')[1];
+    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    const userId = decodedToken.uid;
+    const postId = req.params.postId;
+
+    if (db && db.collection) {
+      const postDoc = await db.collection('community_posts').doc(postId).get();
+      if (!postDoc.exists) return res.status(404).json({ error: 'Post not found' });
+      const post = postDoc.data();
+
+      const channelDoc = await db.collection('channels').doc(post.channelId).get();
+      if (channelDoc.exists && channelDoc.data().userId !== userId) {
+        return res.status(403).json({ error: 'Not authorized' });
+      }
+
+      await db.collection('community_posts').doc(postId).delete();
+
+      const commentsSnapshot = await db.collection('community_comments')
+        .where('postId', '==', postId).get();
+      await Promise.all(commentsSnapshot.docs.map(d => d.ref.delete()));
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Delete post error:', error);
+    res.status(500).json({ error: 'Failed to delete post' });
+  }
+});
+
+// React to community post
+app.post('/api/community/:postId/react', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+    const idToken = authHeader.split('Bearer ')[1];
+    let userId;
+    try {
+      const decoded = await admin.auth().verifyIdToken(idToken);
+      userId = decoded.uid;
+    } catch (e) {
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+
+    const postId = req.params.postId;
+    const { emoji, action } = req.body;
+    if (!emoji) return res.status(400).json({ error: 'Emoji required' });
+
+    let reactions = {};
+    if (db && db.collection) {
+      const postRef = db.collection('community_posts').doc(postId);
+      const postDoc = await postRef.get();
+      if (!postDoc.exists) return res.status(404).json({ error: 'Post not found' });
+      reactions = postDoc.data().reactions || {};
+
+      if (!reactions[emoji]) reactions[emoji] = [];
+      if (action === 'remove') {
+        reactions[emoji] = reactions[emoji].filter(id => id !== userId);
+        if (reactions[emoji].length === 0) delete reactions[emoji];
+      } else {
+        if (!reactions[emoji].includes(userId)) reactions[emoji].push(userId);
+      }
+
+      await postRef.update({ reactions });
+    } else {
+      const allPosts = Object.values(global.communityPosts || {}).flat();
+      const post = allPosts.find(p => p.id === postId);
+      if (post) {
+        reactions = post.reactions || {};
+        if (!reactions[emoji]) reactions[emoji] = [];
+        if (action === 'remove') {
+          reactions[emoji] = reactions[emoji].filter(id => id !== userId);
+        } else {
+          if (!reactions[emoji].includes(userId)) reactions[emoji].push(userId);
+        }
+        post.reactions = reactions;
+      }
+    }
+
+    res.json({ success: true, reactions });
+  } catch (error) {
+    console.error('React error:', error);
+    res.status(500).json({ error: 'Failed to react' });
+  }
+});
+
+// Get community post comments
+app.get('/api/community/:postId/comments', async (req, res) => {
+  try {
+    const postId = req.params.postId;
+    let comments = [];
+
+    if (db && db.collection) {
+      const snapshot = await db.collection('community_comments')
+        .where('postId', '==', postId)
+        .orderBy('createdAt', 'asc')
+        .limit(50)
+        .get();
+      comments = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    } else {
+      comments = global.communityComments?.[postId] || [];
+    }
+
+    res.json({ success: true, comments });
+  } catch (error) {
+    console.error('Get comments error:', error);
+    res.status(500).json({ error: 'Failed to fetch comments' });
+  }
+});
+
+// Add comment to community post
+app.post('/api/community/:postId/comment', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+    const idToken = authHeader.split('Bearer ')[1];
+    let userId, userName, userAvatar;
+    try {
+      const decoded = await admin.auth().verifyIdToken(idToken);
+      userId = decoded.uid;
+      userName = decoded.name || decoded.email?.split('@')[0] || 'User';
+      userAvatar = decoded.picture || null;
+    } catch (e) {
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+
+    const postId = req.params.postId;
+    const { text } = req.body;
+    if (!text || !text.trim()) {
+      return res.status(400).json({ error: 'Comment text required' });
+    }
+
+    const commentData = sanitizeFirestoreData({
+      postId, userId, userName, userAvatar,
+      text: text.trim().substring(0, 1000),
+      reactions: {},
+      createdAt: new Date().toISOString()
+    });
+
+    let commentId;
+    if (db && db.collection) {
+      const docRef = await db.collection('community_comments').add(commentData);
+      commentId = docRef.id;
+      await db.collection('community_posts').doc(postId).update({
+        commentCount: admin.firestore.FieldValue.increment(1)
+      });
+    } else {
+      commentId = 'comment_' + Date.now();
+      if (!global.communityComments) global.communityComments = {};
+      if (!global.communityComments[postId]) global.communityComments[postId] = [];
+      global.communityComments[postId].push({ id: commentId, ...commentData });
+    }
+
+    res.json({ success: true, comment: { id: commentId, ...commentData } });
+  } catch (error) {
+    console.error('Add comment error:', error);
+    res.status(500).json({ error: 'Failed to add comment' });
+  }
+});
+
+// ==================== CHANNEL LOOKUP BY USER ID ====================
+async function getChannelByUserId(userId) {
+  if (!userId || !db || !db.collection) return null;
+  try {
+    const snapshot = await db.collection('channels')
+      .where('userId', '==', userId)
+      .limit(1)
+      .get();
+    if (snapshot.empty) return null;
+    const doc = snapshot.docs[0];
+    return { id: doc.id, ...doc.data() };
+  } catch (error) {
+    console.error('Error fetching channel by user:', error);
+    return null;
+  }
 }
 
-document.getElementById('loadMoreBtn').addEventListener('click', function() {
-    if (hasMoreComments && !isLoadingComments) {
-        loadComments(currentPage + 1);
-    }
-});
+function generateChannelHTML(channel, channelId, prompts, isSubscribed, currentUserId, canonicalUrl) {
+    const avatarUrl = channel.avatarUrl || 'https://via.placeholder.com/100x100/4e54c8/ffffff?text=' + encodeURIComponent(channel.channelName?.charAt(0) || 'C');
+    const bannerUrl = channel.bannerUrl || 'https://via.placeholder.com/1200x300/2d334a/ffffff?text=' + encodeURIComponent(channel.channelName || 'Channel');
+    const description = channel.description || `Channel of ${channel.channelName || 'Channel'} - AI prompts and creations.`;
+    const title = `${channel.channelName || 'Channel'} - tools prompt Channel`;
+    const subscriberCount = channel.subscribers || 0;
+    const totalSupport = channel.totalSupport || 0;
+    const totalSupportCount = channel.totalSupportCount || 0;
+    const totalLikes = prompts.reduce((sum, p) => sum + (p.likes || 0), 0);
+    const formattedSubs = subscriberCount >= 1000 ? (subscriberCount / 1000).toFixed(1) + 'K' : subscriberCount;
+    const formattedSupport = totalSupport >= 1000 ? '₹' + (totalSupport / 1000).toFixed(1) + 'K' : '₹' + totalSupport;
 
-document.addEventListener('DOMContentLoaded', function() {
-    loadComments(1);
-    
-    const commentTextarea = document.getElementById('commentContent');
-    if (commentTextarea) {
-        const counter = document.createElement('div');
-        counter.style.color = '#666';
-        counter.style.fontSize = '0.85rem';
-        counter.style.textAlign = 'right';
-        counter.style.marginTop = '0.25rem';
-        counter.textContent = '0/1000';
-        
-        commentTextarea.parentNode.appendChild(counter);
-        
-        commentTextarea.addEventListener('input', function() {
-            counter.textContent = this.value.length + '/1000';
-            if (this.value.length > 1000) {
-                counter.style.color = '#ff6b6b';
+    // The channel owner's userId is stamped onto the page so client-side JS
+    // can determine ownership once Firebase auth resolves.
+    const channelOwnerId = channel.userId || '';
+
+    const promptsHTML = prompts.map(p => {
+        const isVideo = p.fileType === 'video' || p.videoUrl;
+        const imageUrl = p.thumbnailUrl || p.imageUrl || 'https://via.placeholder.com/300x200/4e54c8/ffffff?text=Prompt';
+        const price = p.price || 0;
+        const isPaid = price > 0;
+        return `
+            <div class="channel-prompt-card" onclick="window.location.href='/prompt/${p.id}'">
+                <div class="channel-prompt-thumbnail">
+                    <img src="${imageUrl}" alt="${p.title || 'Prompt'}">
+                    ${isVideo ? '<span class="video-badge"><i class="fas fa-play"></i></span>' : ''}
+                    <span class="price-badge ${!isPaid ? 'free' : ''}">${isPaid ? '₹' + price : 'Free'}</span>
+                </div>
+                <div class="channel-prompt-info">
+                    <h4>${p.title || 'Untitled Prompt'}</h4>
+                    <div class="channel-prompt-meta">
+                        <span><i class="fas fa-eye"></i> ${p.views || 0}</span>
+                        <span><i class="fas fa-heart"></i> ${p.likes || 0}</span>
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join('');
+
+    const supportersHTML = `
+        <div id="supportersSection" style="margin-top: 20px; ${totalSupportCount === 0 ? 'display:none;' : ''}">
+            <h4 style="color: #4e54c8; margin-bottom: 10px;">Top Supporters</h4>
+            <div id="supportersList" style="display: flex; flex-wrap: wrap; gap: 10px;"></div>
+        </div>
+    `;
+
+    const structuredData = {
+        "@context": "https://schema.org",
+        "@type": "ProfilePage",
+        "name": channel.channelName || "Channel",
+        "description": (channel.description || `Channel of ${channel.channelName || 'Channel'}`)
+            .replace(/\r\n/g, ' ').replace(/\s+/g, ' ').trim(),
+        "url": canonicalUrl || `https://www.toolsprompt.com/channel/${channelId}`,
+        "mainEntity": {
+            "@type": "Person",
+            "@id": (canonicalUrl || `https://www.toolsprompt.com/channel/${channelId}`) + "#person",
+            "name": channel.channelName || "Channel Owner",
+            "identifier": channel.channelHandle || channel.channelName || channelId,
+            "image": channel.avatarUrl || "https://www.toolsprompt.com/logo.png",
+            "description": (channel.description || `Channel of ${channel.channelName || 'Channel'}`)
+                .replace(/\r\n/g, ' ').replace(/\s+/g, ' ').trim(),
+            "url": canonicalUrl || `https://www.toolsprompt.com/channel/${channelId}`,
+            "interactionStatistic": [
+                {
+                    "@type": "InteractionCounter",
+                    "interactionType": "https://schema.org/SubscribeAction",
+                    "userInteractionCount": subscriberCount
+                },
+                {
+                    "@type": "InteractionCounter",
+                    "interactionType": "https://schema.org/LikeAction",
+                    "userInteractionCount": totalLikes
+                }
+            ]
+        },
+        "dateCreated": channel.createdAt || new Date().toISOString()
+    };
+
+    const structuredDataJSON = JSON.stringify(structuredData);
+
+    return `<!DOCTYPE html>
+<html lang="en" itemscope itemtype="https://schema.org/ProfilePage">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>${title}</title>
+    <meta name="description" content="${description.replace(/"/g, '&quot;')}">
+    <meta name="robots" content="index, follow, max-image-preview:large">
+    <link rel="canonical" href="${canonicalUrl}" />
+    <meta property="og:title" content="${title}">
+    <meta property="og:description" content="${description.replace(/"/g, '&quot;')}">
+    <meta property="og:image" content="${avatarUrl}">
+    <meta property="og:url" content="${canonicalUrl}">
+    <meta property="og:type" content="profile">
+    <meta property="og:site_name" content="tools prompt">
+    <meta property="profile:username" content="${channel.channelHandle || channel.channelName || 'channel'}">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="${title}">
+    <meta name="twitter:description" content="${description.replace(/"/g, '&quot;')}">
+    <meta name="twitter:image" content="${avatarUrl}">
+    <script type="application/ld+json">
+${structuredDataJSON}
+    </script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-auth-compat.js"></script>
+    <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        body { background: #f5f7fa; color: #2d334a; }
+        .channel-header { position: relative; }
+        .channel-banner { width: 100%; height: 250px; object-fit: cover; background: linear-gradient(135deg, #2d334a, #4e54c8); }
+        .channel-info { max-width: 1200px; margin: -60px auto 0; padding: 0 20px; position: relative; z-index: 2; }
+        .channel-avatar { width: 120px; height: 120px; border-radius: 50%; border: 4px solid white; object-fit: cover; background: white; box-shadow: 0 4px 20px rgba(0,0,0,0.15); }
+        .channel-details { display: flex; flex-wrap: wrap; align-items: center; gap: 20px; margin-top: 10px; background: white; padding: 20px 25px; border-radius: 15px; box-shadow: 0 2px 10px rgba(0,0,0,0.08); }
+        .channel-name-section { flex: 1; }
+        .channel-name { font-size: 1.8rem; font-weight: 700; display: flex; align-items: center; gap: 10px; }
+        .channel-handle { color: #666; font-size: 1rem; }
+        .channel-description { color: #555; margin-top: 5px; }
+        .channel-stats { display: flex; gap: 20px; margin-top: 8px; color: #666; font-size: 0.9rem; flex-wrap: wrap; }
+        .channel-actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+        .subscribe-btn { background: #ff0000; color: white; border: none; padding: 10px 24px; border-radius: 25px; font-weight: 600; cursor: pointer; transition: all 0.3s ease; font-size: 0.95rem; }
+        .subscribe-btn:hover { transform: scale(1.05); box-shadow: 0 4px 15px rgba(255,0,0,0.3); }
+        .subscribe-btn.subscribed { background: #666; }
+        .subscribe-btn.subscribed:hover { background: #444; }
+        .channel-btn { background: #f0f0f0; border: none; padding: 10px 20px; border-radius: 25px; font-weight: 500; cursor: pointer; transition: all 0.3s ease; color: #333; }
+        .channel-btn:hover { background: #e0e0e0; }
+        .verify-badge { background: #4e54c8; color: white; padding: 2px 10px; border-radius: 12px; font-size: 0.7rem; font-weight: 600; }
+        .support-btn { background: linear-gradient(135deg, #ff6b6b, #ff8787); color: white; border: none; padding: 10px 24px; border-radius: 25px; font-weight: 600; cursor: pointer; transition: all 0.3s ease; font-size: 0.95rem; display: inline-flex; align-items: center; gap: 8px; }
+        .support-btn:hover { transform: scale(1.05); box-shadow: 0 4px 15px rgba(255,107,107,0.4); }
+        .support-stats { display: flex; gap: 20px; margin-top: 8px; color: #666; font-size: 0.9rem; }
+        .support-stats span i { color: #ff6b6b; margin-right: 4px; }
+        .support-modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: none; align-items: center; justify-content: center; z-index: 10001; animation: fadeIn 0.3s ease; }
+        .support-modal-overlay.active { display: flex; }
+        .support-modal { background: white; border-radius: 20px; width: 90%; max-width: 450px; max-height: 90vh; overflow-y: auto; padding: 30px; animation: slideUp 0.3s ease; }
+        .support-modal h2 { color: #4e54c8; margin-bottom: 5px; }
+        .support-modal .subtitle { color: #666; margin-bottom: 20px; }
+        .amount-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 15px; }
+        .amount-options button { padding: 12px; border: 2px solid #e9ecef; border-radius: 12px; background: white; font-weight: 600; cursor: pointer; transition: all 0.3s ease; }
+        .amount-options button:hover, .amount-options button.selected { border-color: #4e54c8; background: #f0f4ff; }
+        .custom-amount-input { width: 100%; padding: 12px; border: 2px solid #e9ecef; border-radius: 12px; font-size: 1rem; margin-bottom: 15px; }
+        .support-message-input { width: 100%; padding: 12px; border: 2px solid #e9ecef; border-radius: 12px; font-size: 1rem; resize: vertical; min-height: 60px; font-family: inherit; }
+        .anonymous-check { display: flex; align-items: center; gap: 8px; margin: 10px 0; color: #666; }
+        .support-submit-btn { width: 100%; background: linear-gradient(135deg, #ff6b6b, #ff8787); color: white; border: none; padding: 14px; border-radius: 40px; font-weight: 700; font-size: 1.1rem; cursor: pointer; transition: all 0.3s ease; }
+        .support-submit-btn:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(255,107,107,0.4); }
+        .support-close-btn { background: none; border: none; font-size: 1.8rem; cursor: pointer; color: #666; float: right; }
+        .supporter-item { background: #f8f9fa; padding: 8px 14px; border-radius: 30px; display: inline-flex; align-items: center; gap: 8px; font-size: 0.85rem; }
+        .supporter-item .amount { font-weight: 700; color: #ff6b6b; }
+        .support-close-btn:hover { color: #ff6b6b; }
+        @media (max-width: 768px) { .amount-options { grid-template-columns: repeat(2, 1fr); } }
+        .channel-content { max-width: 1200px; margin: 30px auto; padding: 0 20px; }
+        .content-tabs { display: flex; gap: 0; border-bottom: 2px solid #e9ecef; margin-bottom: 25px; flex-wrap: wrap; }
+        .content-tab { padding: 12px 24px; background: none; border: none; border-bottom: 3px solid transparent; font-weight: 600; cursor: pointer; transition: all 0.3s ease; color: #666; }
+        .content-tab.active { border-bottom-color: #4e54c8; color: #4e54c8; }
+        .content-tab:hover { color: #4e54c8; }
+        .prompts-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 20px; }
+        .channel-prompt-card { background: white; border-radius: 12px; overflow: hidden; cursor: pointer; transition: all 0.3s ease; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+        .channel-prompt-card:hover { transform: translateY(-5px); box-shadow: 0 8px 25px rgba(0,0,0,0.15); }
+        .channel-prompt-thumbnail { position: relative; height: 180px; overflow: hidden; background: #000; }
+        .channel-prompt-thumbnail img { width: 100%; height: 100%; object-fit: cover; }
+        .video-badge { position: absolute; top: 10px; right: 10px; background: rgba(255,0,0,0.9); color: white; padding: 4px 8px; border-radius: 4px; font-size: 11px; }
+        .channel-prompt-info { padding: 15px; }
+        .channel-prompt-info h4 { font-size: 1rem; margin-bottom: 8px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+        .channel-prompt-meta { display: flex; gap: 15px; font-size: 0.85rem; color: #666; }
+        .price-badge { position: absolute; bottom: 10px; left: 10px; background: linear-gradient(135deg, #ff6b6b, #ff8787); color: white; padding: 2px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; }
+        .price-badge.free { background: linear-gradient(135deg, #20bf6b, #4cd964); }
+        .no-prompts { text-align: center; padding: 60px 20px; color: #666; background: white; border-radius: 12px; }
+        .no-prompts i { font-size: 3rem; color: #ccc; margin-bottom: 15px; }
+        .back-link { display: inline-block; margin-top: 20px; color: #4e54c8; text-decoration: none; font-weight: 600; }
+        .back-link:hover { text-decoration: underline; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes slideUp { from { transform: translateY(50px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        @keyframes slideDown { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        /* ==================== COMMUNITY FEATURE ==================== */
+        .community-wrapper { max-width: 700px; margin: 0 auto; }
+        .community-create-btn {
+          width: 100%;
+          background: linear-gradient(135deg, #4e54c8, #8f94fb);
+          color: white; border: none; padding: 16px 24px;
+          border-radius: 14px; font-size: 1rem; font-weight: 600;
+          cursor: pointer; display: flex; align-items: center;
+          justify-content: center; gap: 10px; margin-bottom: 24px;
+          transition: all 0.3s ease;
+          box-shadow: 0 4px 15px rgba(78, 84, 200, 0.3);
+        }
+        .community-create-btn:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(78, 84, 200, 0.45); }
+        .community-feed { display: flex; flex-direction: column; gap: 20px; }
+        .community-post {
+          background: white; border-radius: 16px; padding: 18px;
+          box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+          border: 1px solid #e9ecef; animation: fadeIn 0.3s ease;
+        }
+        .post-header { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; position: relative; }
+        .post-avatar {
+          width: 44px; height: 44px; border-radius: 50%;
+          overflow: hidden; flex-shrink: 0;
+          background: linear-gradient(135deg, #4e54c8, #8f94fb);
+          display: flex; align-items: center; justify-content: center;
+        }
+        .post-avatar img { width: 100%; height: 100%; object-fit: cover; }
+        .post-avatar-letter { color: white; font-weight: 700; font-size: 1.2rem; }
+        .post-author { flex: 1; display: flex; flex-direction: column; }
+        .post-author strong { color: #1a1a2e; font-size: 0.98rem; }
+        .post-author span { color: #888; font-size: 0.78rem; }
+        .post-delete-btn {
+          background: none; border: none; color: #ccc;
+          cursor: pointer; font-size: 0.9rem; padding: 6px;
+          border-radius: 50%; transition: all 0.2s;
+        }
+        .post-delete-btn:hover { color: #ff6b6b; background: #ffeaea; }
+        .post-text { color: #2d334a; font-size: 0.98rem; line-height: 1.6; margin-bottom: 12px; white-space: pre-wrap; word-wrap: break-word; }
+        .post-image { width: 100%; border-radius: 12px; overflow: hidden; margin-bottom: 12px; background: #f8f9fa; }
+        .post-image img { width: 100%; display: block; max-height: 600px; object-fit: contain; }
+        .post-prompt-box {
+          background: #f8f9fa; border-left: 4px solid #4e54c8;
+          border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; position: relative;
+        }
+        .post-prompt-label {
+          font-size: 0.75rem; font-weight: 700; color: #4e54c8;
+          text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;
+        }
+        .post-prompt-text {
+          font-family: 'Courier New', monospace; font-size: 0.85rem;
+          color: #444; line-height: 1.5; white-space: pre-wrap;
+          word-break: break-word; padding-right: 70px;
+        }
+        .post-copy-prompt-btn {
+          position: absolute; top: 12px; right: 12px;
+          background: #4e54c8; color: white; border: none;
+          padding: 6px 12px; border-radius: 20px;
+          font-size: 0.75rem; font-weight: 600; cursor: pointer;
+          transition: all 0.2s; display: flex; align-items: center; gap: 4px;
+        }
+        .post-copy-prompt-btn:hover { background: #3f44b8; transform: scale(1.05); }
+        .post-copy-prompt-btn.copied { background: #20bf6b; }
+        .post-actions {
+          display: flex; align-items: center; justify-content: space-between;
+          gap: 12px; padding-top: 12px; border-top: 1px solid #f1f3f5; flex-wrap: wrap;
+        }
+        .post-reactions { display: flex; gap: 6px; flex-wrap: wrap; }
+        .reaction-btn {
+          background: #f1f3f5; border: 2px solid transparent;
+          padding: 5px 10px; border-radius: 20px; cursor: pointer;
+          display: flex; align-items: center; gap: 5px;
+          font-size: 0.9rem; transition: all 0.2s ease;
+        }
+        .reaction-btn:hover { background: #e9ecef; transform: scale(1.05); }
+        .reaction-btn.active { background: #e7ebff; border-color: #4e54c8; }
+        .reaction-btn .reaction-count { font-size: 0.78rem; font-weight: 700; color: #4e54c8; }
+        .reaction-btn .reaction-emoji { font-size: 1.05rem; }
+        .post-comment-toggle {
+          background: none; border: none; color: #666;
+          font-size: 0.9rem; cursor: pointer; padding: 6px 12px;
+          border-radius: 20px; transition: all 0.2s;
+          display: flex; align-items: center; gap: 6px; font-weight: 500;
+        }
+        .post-comment-toggle:hover { background: #f1f3f5; color: #4e54c8; }
+        .post-comments {
+          margin-top: 14px; padding-top: 14px;
+          border-top: 1px solid #f1f3f5; animation: slideDown 0.25s ease;
+        }
+        .comment-item { display: flex; gap: 10px; padding: 8px 0; animation: fadeIn 0.25s ease; }
+        .comment-avatar {
+          width: 34px; height: 34px; border-radius: 50%;
+          overflow: hidden; flex-shrink: 0;
+          background: linear-gradient(135deg, #8f94fb, #4e54c8);
+          display: flex; align-items: center; justify-content: center;
+        }
+        .comment-avatar img { width: 100%; height: 100%; object-fit: cover; }
+        .comment-avatar-letter { color: white; font-weight: 700; font-size: 0.85rem; }
+        .comment-body { flex: 1; }
+        .comment-author { font-size: 0.82rem; margin-bottom: 2px; }
+        .comment-author strong { color: #1a1a2e; }
+        .comment-author span { color: #aaa; font-weight: 400; margin-left: 6px; }
+        .comment-text { color: #2d334a; font-size: 0.9rem; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word; }
+        .comment-input-row { display: flex; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #f1f3f5; }
+        .comment-input {
+          flex: 1; padding: 10px 14px; border: 2px solid #e9ecef;
+          border-radius: 24px; font-size: 0.9rem; outline: none;
+          font-family: inherit; transition: border-color 0.2s;
+        }
+        .comment-input:focus { border-color: #4e54c8; }
+        .comment-submit {
+          background: #4e54c8; color: white; border: none;
+          width: 42px; height: 42px; border-radius: 50%;
+          cursor: pointer; display: flex; align-items: center;
+          justify-content: center; transition: all 0.2s; flex-shrink: 0;
+        }
+        .comment-submit:hover { background: #3f44b8; transform: scale(1.05); }
+        .comment-submit:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+        .comment-login-prompt { text-align: center; padding: 12px; color: #666; font-size: 0.9rem; }
+        .comment-login-prompt a { color: #4e54c8; font-weight: 600; text-decoration: none; }
+        .comment-login-prompt a:hover { text-decoration: underline; }
+        .community-empty {
+          text-align: center; padding: 60px 20px; color: #666;
+          background: white; border-radius: 16px; box-shadow: 0 2px 12px rgba(0,0,0,0.05);
+        }
+        .community-empty i { font-size: 3rem; color: #ccc; margin-bottom: 15px; }
+        .community-empty h3 { color: #2d334a; margin-bottom: 8px; }
+        .community-loading, .comments-loading { text-align: center; padding: 40px; color: #666; }
+        .community-loading .spinner, .comments-loading .spinner {
+          width: 28px; height: 28px;
+          border: 3px solid #e9ecef; border-top: 3px solid #4e54c8;
+          border-radius: 50%; animation: spin 0.8s linear infinite;
+          margin: 0 auto 12px;
+        }
+        .no-comments-yet { text-align: center; color: #aaa; font-size: 0.88rem; padding: 12px 0; font-style: italic; }
+        .community-modal-overlay {
+          position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+          display: none; align-items: center; justify-content: center;
+          z-index: 100000; padding: 20px; backdrop-filter: blur(6px);
+          animation: fadeIn 0.25s ease;
+        }
+        .community-modal-overlay.active { display: flex; }
+        .community-modal {
+          background: white; border-radius: 18px;
+          width: 100%; max-width: 560px; max-height: 92vh;
+          display: flex; flex-direction: column; overflow: hidden;
+          animation: slideUp 0.3s ease; box-shadow: 0 25px 80px rgba(0,0,0,0.4);
+        }
+        .community-modal-header {
+          padding: 18px 22px; background: linear-gradient(135deg, #4e54c8, #8f94fb);
+          color: white; display: flex; justify-content: space-between; align-items: center;
+        }
+        .community-modal-header h2 { margin: 0; font-size: 1.15rem; display: flex; align-items: center; gap: 8px; }
+        .community-modal-header .close-modal {
+          background: rgba(255,255,255,0.2); border: none; color: white;
+          width: 34px; height: 34px; border-radius: 50%;
+          cursor: pointer; font-size: 1.1rem;
+          display: flex; align-items: center; justify-content: center;
+        }
+        .community-modal-header .close-modal:hover { background: rgba(255,255,255,0.35); }
+        .community-modal-body { padding: 20px 22px; overflow-y: auto; flex: 1; }
+        .community-modal-body .form-group { margin-bottom: 16px; }
+        .community-modal-body label { display: block; margin-bottom: 6px; font-weight: 600; color: #2d334a; font-size: 0.92rem; }
+        .community-modal-body textarea {
+          width: 100%; padding: 12px 14px; border: 2px solid #e9ecef;
+          border-radius: 10px; font-size: 0.95rem; font-family: inherit;
+          resize: vertical; min-height: 80px; outline: none;
+          transition: border-color 0.2s;
+        }
+        .community-modal-body textarea:focus { border-color: #4e54c8; }
+        .community-modal-body small { color: #888; font-size: 0.78rem; display: block; margin-top: 4px; }
+        .file-upload-area {
+          border: 2px dashed #e9ecef; border-radius: 10px;
+          padding: 24px; text-align: center; cursor: pointer;
+          transition: all 0.2s; position: relative;
+        }
+        .file-upload-area:hover { border-color: #4e54c8; background: #f8f9ff; }
+        .file-upload-area i { font-size: 1.8rem; color: #4e54c8; margin-bottom: 6px; display: block; }
+        .file-upload-area p { margin: 4px 0; color: #666; font-size: 0.88rem; }
+        .file-upload-area input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+        .image-preview { margin-top: 10px; position: relative; border-radius: 10px; overflow: hidden; border: 2px solid #e9ecef; }
+        .image-preview img { width: 100%; max-height: 250px; object-fit: cover; display: block; }
+        .image-preview .remove-preview {
+          position: absolute; top: 8px; right: 8px;
+          background: rgba(0,0,0,0.65); color: white;
+          border: none; border-radius: 50%;
+          width: 28px; height: 28px; cursor: pointer;
+          font-size: 1rem; display: flex;
+          align-items: center; justify-content: center;
+        }
+        .image-preview .remove-preview:hover { background: #ff6b6b; }
+        .community-modal-footer {
+          padding: 14px 22px; border-top: 1px solid #e9ecef;
+          display: flex; gap: 12px; justify-content: flex-end; background: #f8f9fa;
+        }
+        .community-modal-footer .btn-secondary {
+          background: #e9ecef; color: #555; border: none;
+          padding: 10px 22px; border-radius: 30px;
+          font-weight: 600; cursor: pointer;
+          font-size: 0.92rem; transition: all 0.2s;
+        }
+        .community-modal-footer .btn-secondary:hover { background: #dde1e6; }
+        .community-modal-footer .btn-primary {
+          background: linear-gradient(135deg, #4e54c8, #8f94fb);
+          color: white; border: none;
+          padding: 10px 26px; border-radius: 30px;
+          font-weight: 700; cursor: pointer;
+          font-size: 0.92rem; transition: all 0.2s;
+          display: inline-flex; align-items: center; gap: 8px;
+        }
+        .community-modal-footer .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(78,84,200,0.4); }
+        .community-modal-footer .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+
+        @media (max-width: 768px) {
+            .channel-banner { height: 150px; }
+            .channel-info { margin-top: -40px; }
+            .channel-avatar { width: 80px; height: 80px; }
+            .channel-details { flex-direction: column; text-align: center; padding: 15px; }
+            .channel-name { font-size: 1.4rem; justify-content: center; }
+            .channel-actions { justify-content: center; width: 100%; }
+            .prompts-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
+            .channel-prompt-thumbnail { height: 130px; }
+            .amount-options { grid-template-columns: repeat(2, 1fr); }
+            .post-prompt-text { padding-right: 0; padding-top: 28px; }
+            .post-copy-prompt-btn { top: 8px; right: 8px; padding: 5px 10px; font-size: 0.7rem; }
+            .reaction-btn { padding: 4px 8px; font-size: 0.82rem; }
+            .community-modal { max-height: 95vh; }
+            .community-modal-header, .community-modal-body, .community-modal-footer { padding-left: 16px; padding-right: 16px; }
+        }
+        @media (max-width: 480px) {
+            .prompts-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+            .channel-prompt-thumbnail { height: 110px; }
+            .channel-prompt-info h4 { font-size: 0.85rem; }
+            .support-modal { padding: 20px; }
+        }
+    </style>
+</head>
+<body>
+    <header style="background: white; padding: 10px 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); position: sticky; top: 0; z-index: 100;">
+        <div style="max-width: 1200px; margin: 0 auto; display: flex; justify-content: space-between; align-items: center;">
+           <a href="/" style="display: flex; align-items: center; gap: 10px; text-decoration: none; color: #4e54c8; font-weight: 700; font-size: 1.2rem;">
+    <img src="/logo.png" alt="Tools Prompt Logo" style="height: 40px; width: auto; border-radius: 8px;" onerror="this.style.display='none'; this.nextElementSibling.style.display='inline';">
+    <span >Tools Prompt</span>
+</a>
+            <div style="display: flex; gap: 15px; align-items: center;">
+                <a href="/" style="color: #333; text-decoration: none;">Home</a>
+                <a href="/dashboard.html" style="color: #333; text-decoration: none;">Dashboard</a>
+                <div id="authSection">
+                    <a href="/login.html" class="login-btn-header" style="background: linear-gradient(135deg, #4e54c8, #8f94fb); color: white; padding: 8px 20px; border-radius: 25px; text-decoration: none; font-weight: 600; font-size: 0.9rem;">Login</a>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <div class="channel-header">
+        <img src="${bannerUrl}" alt="${channel.channelName || 'Channel'} banner" class="channel-banner">
+        <div class="channel-info">
+            <img src="${avatarUrl}" alt="${channel.channelName || 'Channel'}" class="channel-avatar">
+            <div class="channel-details">
+                <div class="channel-name-section">
+                    <div class="channel-name">
+                        ${channel.channelName || 'Channel'}
+                        ${channel.isVerified ? '<span class="verify-badge"><i class="fas fa-check-circle"></i> Verified</span>' : ''}
+                    </div>
+                    <div class="channel-handle">${channel.channelHandle || ''}</div>
+                    ${channel.description ? `<div class="channel-description">${channel.description}</div>` : ''}
+                    <div class="channel-stats">
+                        <span><i class="fas fa-users"></i> ${formattedSubs} subscribers</span>
+                        <span><i class="fas fa-video"></i> ${prompts.length} prompts</span>
+                        <span><i class="fas fa-eye"></i> ${channel.totalViews || 0} total views</span>
+                        ${totalSupportCount > 0 ? `<span><i class="fas fa-heart" style="color:#ff6b6b;"></i> ${formattedSupport} raised</span>` : ''}
+                    </div>
+                    <div class="support-stats">
+                        ${totalSupportCount > 0 ? `<span><i class="fas fa-heart"></i> ${totalSupportCount} supporters</span>` : ''}
+                    </div>
+                </div>
+
+                <!-- Both owner and visitor action groups are always emitted.
+                     Client-side JS toggles visibility based on isOwnerUser. -->
+                <div class="channel-actions">
+                    <div id="ownerActions" style="display:none; gap: 12px; align-items: center; flex-wrap: wrap;">
+                        <button class="channel-btn" onclick="window.location.href='/dashboard.html'">
+                            <i class="fas fa-edit"></i> Manage Channel
+                        </button>
+                    </div>
+                    <div id="visitorActions" style="display:none; gap: 12px; align-items: center; flex-wrap: wrap;">
+                        <button class="subscribe-btn ${isSubscribed ? 'subscribed' : ''}" id="subscribeBtn" onclick="toggleSubscribe()">
+                            ${isSubscribed ? '<i class="fas fa-check"></i> Subscribed' : '<i class="fas fa-plus"></i> Subscribe'}
+                        </button>
+                        <button class="support-btn" id="supportChannelBtn"><i class="fas fa-heart"></i> Support</button>
+                    </div>
+                    <button class="channel-btn" onclick="window.location.href='/'">
+                        <i class="fas fa-home"></i> Browse Prompts
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="channel-content">
+        <div class="content-tabs">
+            <button class="content-tab active" data-tab="videos">Prompts</button>
+            <button class="content-tab" data-tab="community">
+                <i class="fas fa-users" style="margin-right: 6px;"></i>Community
+            </button>
+            <button class="content-tab" data-tab="about">About</button>
+        </div>
+        <div id="tab-videos" class="tab-content">
+            ${prompts.length > 0 ? `<div class="prompts-grid">${promptsHTML}</div>` : `
+                <div class="no-prompts">
+                    <i class="fas fa-video-slash"></i>
+                    <h3>No prompts yet</h3>
+                    <p>This channel has no prompts yet.</p>
+                </div>
+            `}
+        </div>
+        <div id="tab-community" class="tab-content" style="display: none;">
+            <div class="community-wrapper">
+                <!-- Always emitted; hidden by default. Revealed by client-side JS
+                     when Firebase auth confirms the visitor is the channel owner. -->
+                <button class="community-create-btn" id="openCreatePostBtn"
+                        data-channel-owner-id="${channelOwnerId}"
+                        style="display: none;">
+                    <i class="fas fa-plus-circle"></i> Create Community Post
+                </button>
+                <div class="community-feed" id="communityFeed">
+                    <div class="community-loading">
+                        <div class="spinner"></div>
+                        <p>Loading community posts...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div id="tab-about" class="tab-content" style="display: none;">
+            <div style="background: white; padding: 30px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.08);">
+                <h2 style="color: #4e54c8; margin-bottom: 15px;">About ${channel.channelName || 'Channel'}</h2>
+                <p style="color: #555; line-height: 1.8; font-size: 1.05rem;">${channel.description || 'No description provided yet.'}</p>
+                <div style="margin-top: 20px; display: flex; gap: 30px; flex-wrap: wrap; color: #666;">
+                    <div><strong>Channel Created:</strong> ${channel.createdAt ? new Date(channel.createdAt).toLocaleDateString() : 'N/A'}</div>
+                    <div><strong>Total Prompts:</strong> ${prompts.length}</div>
+                    <div><strong>Subscribers:</strong> ${formattedSubs}</div>
+                    ${totalSupportCount > 0 ? `<div><strong>Total Support:</strong> ${formattedSupport} from ${totalSupportCount} supporters</div>` : ''}
+                </div>
+                ${supportersHTML}
+                <div id="ownerSettingsBlock" style="display:none; margin-top: 25px; padding-top: 25px; border-top: 1px solid #e9ecef;">
+                    <h3 style="color: #2d334a; margin-bottom: 10px;">Channel Settings</h3>
+                    <p style="color: #666;">Customize your channel appearance and settings in the dashboard.</p>
+                    <a href="/dashboard.html" class="back-link"><i class="fas fa-cog"></i> Go to Dashboard</a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Support Modal -->
+    <div class="support-modal-overlay" id="supportModal">
+        <div class="support-modal">
+            <button class="support-close-btn" id="closeSupportModal">&times;</button>
+            <h2><i class="fas fa-heart" style="color:#ff6b6b;"></i> Support ${channel.channelName}</h2>
+            <p class="subtitle">Your support helps the creator continue making amazing content.</p>
+            <div class="amount-options" id="amountOptions">
+                <button data-amount="10">₹10</button>
+                <button data-amount="50">₹50</button>
+                <button data-amount="100">₹100</button>
+                <button data-amount="200">₹200</button>
+                <button data-amount="500">₹500</button>
+                <button data-amount="custom">Custom</button>
+            </div>
+            <input type="number" class="custom-amount-input" id="customAmount" placeholder="Enter amount (₹)" style="display:none;" min="10">
+            <textarea class="support-message-input" id="supportMessage" placeholder="Optional: leave a message for the creator..."></textarea>
+            <div class="anonymous-check">
+                <input type="checkbox" id="anonymousSupport">
+                <label for="anonymousSupport">Support anonymously</label>
+            </div>
+            <button class="support-submit-btn" id="supportSubmitBtn">Support with ₹10</button>
+        </div>
+    </div>
+
+    <!-- Create Post Modal — ALWAYS emitted. Client-side JS gates access. -->
+    <div class="community-modal-overlay" id="createPostModal">
+        <div class="community-modal">
+            <div class="community-modal-header">
+                <h2><i class="fas fa-bullhorn"></i> Create Community Post</h2>
+                <button class="close-modal" id="closeCreatePostModal">&times;</button>
+            </div>
+            <div class="community-modal-body">
+                <div class="form-group">
+                    <label>What's on your mind?</label>
+                    <textarea id="postTextInput" placeholder="Share an update, tip, or AI creation with your community..." maxlength="2000"></textarea>
+                </div>
+                <div class="form-group">
+                    <label>AI Prompt (optional)</label>
+                    <textarea id="postPromptInput" placeholder="Paste the AI prompt you used to generate this image..."></textarea>
+                    <small><i class="fas fa-copy"></i> Viewers can copy this prompt with one click.</small>
+                </div>
+                <div class="form-group">
+                    <label>Image (optional)</label>
+                    <div class="file-upload-area" id="postImageUploadArea">
+                        <i class="fas fa-image"></i>
+                        <p>Click to upload an image</p>
+                        <p style="font-size: 0.78rem; color: #aaa;">JPEG, PNG, WebP, GIF (max 10MB)</p>
+                        <input type="file" id="postImageInput" accept="image/*">
+                    </div>
+                    <div class="image-preview" id="postImagePreview" style="display:none;">
+                        <img id="postImagePreviewImg" src="">
+                        <button class="remove-preview" id="removePostImage">&times;</button>
+                    </div>
+                </div>
+            </div>
+            <div class="community-modal-footer">
+                <button class="btn-secondary" id="cancelPostBtn">Cancel</button>
+                <button class="btn-primary" id="submitPostBtn">
+                    <i class="fas fa-paper-plane"></i> Post
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const firebaseConfig = {
+            apiKey: "AIzaSyCgc0xRtijpyPhOovfwg-MzyahsUFh-hiQ",
+            authDomain: "toolsprompt-5b07e.firebaseapp.com",
+            projectId: "toolsprompt-5b07e",
+            storageBucket: "toolsprompt-5b07e.firebasestorage.app",
+            messagingSenderId: "402263780942",
+            appId: "1:402263780942:web:1013a347dbb72db6b31d1f",
+            measurementId: "G-K4KXR4FZCP"
+        };
+        if (typeof firebase !== 'undefined' && !firebase.apps.length) {
+            firebase.initializeApp(firebaseConfig);
+        }
+
+        const channelId = '${channelId}';
+        let isSubscribed = ${isSubscribed};
+        let currentUser = null;
+        let isOwnerUser = false;       // <-- resolved after Firebase auth
+        let selectedAmount = 10;
+        let communityLoaded = false;
+        let communityPosts = [];
+
+        // ==================== TAB SWITCHING ====================
+        document.querySelectorAll('.content-tab').forEach(tab => {
+            tab.addEventListener('click', function() {
+                document.querySelectorAll('.content-tab').forEach(t => t.classList.remove('active'));
+                this.classList.add('active');
+                const tabName = this.dataset.tab;
+                document.querySelectorAll('.tab-content').forEach(t => t.style.display = 'none');
+                document.getElementById('tab-' + tabName).style.display = 'block';
+
+                if (tabName === 'community' && !communityLoaded) {
+                    communityLoaded = true;
+                    if (typeof loadCommunityPosts === 'function') loadCommunityPosts();
+                }
+            });
+        });
+
+        // ==================== AUTH: determine ownership client-side ====================
+        if (typeof firebase !== 'undefined' && firebase.auth) {
+            firebase.auth().onAuthStateChanged(function(user) {
+                currentUser = user;
+                updateAuthUI(user);
+                resolveOwnership(user);
+                if (user && !isOwnerUser) checkSubscriptionStatus();
+            });
+        }
+
+        function resolveOwnership(user) {
+            // Read the channel owner id that was stamped on the create button.
+            const createBtn = document.getElementById('openCreatePostBtn');
+            const ownerId = createBtn ? createBtn.getAttribute('data-channel-owner-id') : '';
+
+            isOwnerUser = !!(user && ownerId && ownerId !== 'anonymous' && user.uid === ownerId);
+
+            // --- Toggle Create Post button ---
+            if (createBtn) {
+                createBtn.style.display = isOwnerUser ? 'flex' : 'none';
+            }
+
+            // --- Toggle owner vs visitor action buttons ---
+            const ownerActions = document.getElementById('ownerActions');
+            const visitorActions = document.getElementById('visitorActions');
+            if (ownerActions)   ownerActions.style.display   = isOwnerUser ? 'flex' : 'none';
+            if (visitorActions) visitorActions.style.display = isOwnerUser ? 'flex' : 'none';
+
+            // --- Toggle owner-only "Channel Settings" block on About tab ---
+            const ownerSettings = document.getElementById('ownerSettingsBlock');
+            if (ownerSettings) ownerSettings.style.display = isOwnerUser ? 'block' : 'none';
+
+            // --- If posts are already loaded, re-render to add/remove delete buttons ---
+            if (communityLoaded && communityPosts.length > 0 &&
+                typeof renderCommunityPosts === 'function') {
+                renderCommunityPosts();
+            }
+
+            console.log('🔑 Ownership resolved → isOwnerUser =', isOwnerUser, '| uid =', user ? user.uid : 'guest');
+        }
+
+        function updateAuthUI(user) {
+            const authSection = document.getElementById('authSection');
+            if (!authSection) return;
+            if (user) {
+                const name = user.displayName || user.email?.split('@')[0] || 'User';
+                authSection.innerHTML = '<div style="display:flex;align-items:center;gap:10px;"><span style="font-weight:500;font-size:0.9rem;">' + name + '</span><button onclick="logout()" style="background:none;border:none;color:#ff6b6b;cursor:pointer;font-size:1rem;"><i class="fas fa-sign-out-alt"></i></button></div>';
             } else {
-                counter.style.color = '#666';
+                authSection.innerHTML = '<a href="/login.html?returnUrl=' + encodeURIComponent(window.location.href) + '" style="background: linear-gradient(135deg, #4e54c8, #8f94fb); color: white; padding: 8px 20px; border-radius: 25px; text-decoration: none; font-weight: 600; font-size: 0.9rem;">Login</a>';
+            }
+        }
+
+        function logout() {
+            if (typeof firebase !== 'undefined' && firebase.auth) {
+                firebase.auth().signOut().then(() => window.location.reload());
+            }
+        }
+
+        // ==================== SUBSCRIPTION ====================
+        async function checkSubscriptionStatus() {
+            if (!currentUser || isOwnerUser) return;
+            try {
+                const token = await currentUser.getIdToken();
+                const response = await fetch('/api/channel/' + channelId + '/subscription-status', {
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                const data = await response.json();
+                isSubscribed = data.isSubscribed;
+                updateSubscribeButton();
+            } catch (e) { console.error('Error checking subscription:', e); }
+        }
+
+        async function toggleSubscribe() {
+            if (!currentUser) {
+                window.location.href = '/login.html?returnUrl=' + encodeURIComponent(window.location.href);
+                return;
+            }
+            const btn = document.getElementById('subscribeBtn');
+            const action = isSubscribed ? 'unsubscribe' : 'subscribe';
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Loading...';
+            try {
+                const token = await currentUser.getIdToken();
+                const response = await fetch('/api/channel/' + channelId + '/subscribe', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+                    body: JSON.stringify({ action })
+                });
+                const data = await response.json();
+                if (data.success) {
+                    isSubscribed = data.subscribed;
+                    updateSubscribeButton();
+                    const subsDisplay = document.querySelector('.channel-stats span:first-child');
+                    if (subsDisplay) {
+                        const count = data.subscribers || 0;
+                        const formatted = count >= 1000 ? (count / 1000).toFixed(1) + 'K' : count;
+                        subsDisplay.innerHTML = '<i class="fas fa-users"></i> ' + formatted + ' subscribers';
+                    }
+                }
+            } catch (e) {
+                console.error('Subscribe error:', e);
+                alert('Failed to update subscription. Please try again.');
+            } finally { btn.disabled = false; }
+        }
+
+        function updateSubscribeButton() {
+            const btn = document.getElementById('subscribeBtn');
+            if (!btn) return;
+            if (isSubscribed) { btn.className = 'subscribe-btn subscribed'; btn.innerHTML = '<i class="fas fa-check"></i> Subscribed'; }
+            else { btn.className = 'subscribe-btn'; btn.innerHTML = '<i class="fas fa-plus"></i> Subscribe'; }
+        }
+
+        // ==================== SUPPORTERS ====================
+        async function loadSupporters() {
+            try {
+                const response = await fetch('/api/channel/' + channelId + '/supporters?limit=6');
+                const data = await response.json();
+                if (data.success && data.supporters.length > 0) {
+                    const container = document.getElementById('supportersList');
+                    container.innerHTML = data.supporters.map(s => '<div class="supporter-item"><span>' + (s.anonymous ? 'Anonymous' : s.supporterName) + '</span><span class="amount">₹' + s.amount + '</span>' + (s.message ? '<span style="color:#888;font-size:0.8rem;">"' + s.message.substring(0,30) + '"</span>' : '') + '</div>').join('');
+                    document.getElementById('supportersSection').style.display = 'block';
+                }
+            } catch (e) { console.error('Load supporters error:', e); }
+        }
+        loadSupporters();
+
+        // ==================== SUPPORT MODAL ====================
+        const supportModal = document.getElementById('supportModal');
+        const supportBtn = document.getElementById('supportChannelBtn');
+        const closeSupport = document.getElementById('closeSupportModal');
+        const amountOptions = document.getElementById('amountOptions');
+        const customAmount = document.getElementById('customAmount');
+        const supportMessage = document.getElementById('supportMessage');
+        const anonymousCheck = document.getElementById('anonymousSupport');
+        const submitBtn = document.getElementById('supportSubmitBtn');
+
+        if (supportBtn) {
+            supportBtn.addEventListener('click', function() {
+                if (!currentUser) {
+                    window.location.href = '/login.html?returnUrl=' + encodeURIComponent(window.location.href);
+                    return;
+                }
+                supportModal.classList.add('active');
+                document.body.style.overflow = 'hidden';
+            });
+        }
+        if (closeSupport) closeSupport.addEventListener('click', function() {
+            supportModal.classList.remove('active');
+            document.body.style.overflow = '';
+        });
+        if (supportModal) supportModal.addEventListener('click', function(e) {
+            if (e.target === this) {
+                supportModal.classList.remove('active');
+                document.body.style.overflow = '';
             }
         });
+
+        if (amountOptions) amountOptions.addEventListener('click', function(e) {
+            const btn = e.target.closest('button');
+            if (!btn) return;
+            const amount = btn.dataset.amount;
+            document.querySelectorAll('#amountOptions button').forEach(b => b.classList.remove('selected'));
+            btn.classList.add('selected');
+            if (amount === 'custom') {
+                customAmount.style.display = 'block';
+                customAmount.focus();
+                selectedAmount = 0;
+                submitBtn.textContent = 'Support with custom amount';
+            } else {
+                customAmount.style.display = 'none';
+                selectedAmount = parseInt(amount);
+                submitBtn.textContent = 'Support with ₹' + amount;
+            }
+        });
+
+        if (customAmount) customAmount.addEventListener('input', function() {
+            const val = parseInt(this.value);
+            if (val >= 10) { selectedAmount = val; submitBtn.textContent = 'Support with ₹' + val; }
+            else { submitBtn.textContent = 'Enter valid amount (min ₹10)'; }
+        });
+
+        if (submitBtn) submitBtn.addEventListener('click', async function() {
+            if (!currentUser) { alert('Please login to support this channel.'); return; }
+            let amount = selectedAmount;
+            if (amount < 10) { alert('Minimum support amount is ₹10'); return; }
+            const message = supportMessage.value.trim();
+            const anonymous = anonymousCheck.checked;
+            this.disabled = true;
+            this.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Creating order...';
+            try {
+                const idToken = await currentUser.getIdToken();
+                const response = await fetch('/api/channel/' + channelId + '/support', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + idToken },
+                    body: JSON.stringify({ amount, message, anonymous })
+                });
+                const data = await response.json();
+                if (!data.success) throw new Error(data.error || 'Order creation failed');
+
+                if (data.isDemo) {
+                    const verifyRes = await fetch('/api/channel/' + channelId + '/support/verify', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + idToken },
+                        body: JSON.stringify({ orderId: data.orderId, paymentId: 'demo_pay_' + Date.now(), signature: 'demo_signature', amount, message, anonymous })
+                    });
+                    const verifyData = await verifyRes.json();
+                    if (verifyData.success) {
+                        alert('🎉 Support successful! Thank you for supporting this channel.');
+                        supportModal.classList.remove('active');
+                        document.body.style.overflow = '';
+                        loadSupporters();
+                    } else { alert('Support failed. Please try again.'); }
+                } else {
+                    if (typeof Razorpay === 'undefined') {
+                        await new Promise((resolve, reject) => {
+                            const script = document.createElement('script');
+                            script.src = 'https://checkout.razorpay.com/v1/checkout.js';
+                            script.onload = resolve;
+                            script.onerror = reject;
+                            document.head.appendChild(script);
+                        });
+                    }
+                    const options = {
+                        key: data.keyId, amount: data.amount, currency: data.currency,
+                        name: 'Support ${channel.channelName}', description: 'Tip for the creator',
+                        order_id: data.orderId,
+                        handler: async function(response) {
+                            try {
+                                const verifyRes = await fetch('/api/channel/' + channelId + '/support/verify', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + idToken },
+                                    body: JSON.stringify({ orderId: response.razorpay_order_id, paymentId: response.razorpay_payment_id, signature: response.razorpay_signature, amount, message, anonymous })
+                                });
+                                const verifyData = await verifyRes.json();
+                                if (verifyData.success) {
+                                    alert('🎉 Support successful! Thank you for supporting this channel.');
+                                    supportModal.classList.remove('active');
+                                    document.body.style.overflow = '';
+                                    loadSupporters();
+                                } else { alert('Support verification failed. Please contact support.'); }
+                            } catch (e) { alert('Error verifying support. Please try again.'); }
+                        },
+                        modal: { ondismiss: function() { submitBtn.disabled = false; submitBtn.innerHTML = 'Support with ₹' + amount; } },
+                        theme: { color: '#ff6b6b' },
+                        prefill: { email: currentUser.email, name: currentUser.displayName || currentUser.email },
+                        notes: { channelId: channelId, type: 'channel_support' }
+                    };
+                    const rzp = new Razorpay(options);
+                    rzp.open();
+                }
+            } catch (error) {
+                console.error('Support error:', error);
+                alert('Failed to process support. Please try again.');
+            } finally { this.disabled = false; this.innerHTML = 'Support with ₹' + amount; }
+        });
+
+        // ==================== COMMUNITY ====================
+        async function loadCommunityPosts() {
+            const feed = document.getElementById('communityFeed');
+            if (!feed) return;
+
+            try {
+                const response = await fetch('/api/channel/' + channelId + '/community?limit=20');
+                const data = await response.json();
+
+                if (data.success && data.posts && data.posts.length > 0) {
+                    communityPosts = data.posts;
+                    renderCommunityPosts();
+                } else {
+                    feed.innerHTML = '<div class="community-empty"><i class="fas fa-comments"></i><h3>No posts yet</h3><p>' +
+                        (isOwnerUser ? 'Share your first post with your community!' : "The channel owner hasn't posted anything yet.") +
+                        '</p></div>';
+                }
+            } catch (e) {
+                console.error('Load community posts error:', e);
+                feed.innerHTML = '<div class="community-empty"><i class="fas fa-exclamation-triangle"></i><p>Failed to load posts</p></div>';
+            }
+        }
+
+        function escapeHtmlText(text) {
+            const div = document.createElement('div');
+            div.textContent = text || '';
+            return div.innerHTML;
+        }
+
+        function getTimeAgo(dateStr) {
+            if (!dateStr) return 'just now';
+            const diff = Date.now() - new Date(dateStr).getTime();
+            const mins = Math.floor(diff / 60000);
+            if (mins < 1) return 'just now';
+            if (mins < 60) return mins + 'm';
+            const hrs = Math.floor(mins / 60);
+            if (hrs < 24) return hrs + 'h';
+            const days = Math.floor(hrs / 24);
+            if (days < 30) return days + 'd';
+            return Math.floor(days / 30) + 'mo';
+        }
+
+        const REACTION_EMOJIS = ['👍', '❤️', '🔥', '😂', '😮'];
+
+        function renderReactions(reactions, postId) {
+            reactions = reactions || {};
+            return REACTION_EMOJIS.map(emoji => {
+                const users = reactions[emoji] || [];
+                const count = users.length;
+                const isActive = currentUser && users.includes(currentUser.uid);
+                return '<button class="reaction-btn ' + (isActive ? 'active' : '') + '" onclick="toggleReaction(event, \\'' + postId + '\\', \\'' + emoji + '\\')">' +
+                    '<span class="reaction-emoji">' + emoji + '</span>' +
+                    (count > 0 ? '<span class="reaction-count">' + count + '</span>' : '') +
+                    '</button>';
+            }).join('');
+        }
+
+        function renderCommunityPosts() {
+            const feed = document.getElementById('communityFeed');
+            if (!feed) return;
+
+            feed.innerHTML = communityPosts.map(post => {
+                const timeAgo = getTimeAgo(post.createdAt);
+                const reactionsHTML = renderReactions(post.reactions, post.id);
+                const hasPrompt = post.promptText && post.promptText.trim();
+                const loginUrl = '/login.html?returnUrl=' + encodeURIComponent(window.location.href);
+
+                return '<div class="community-post" data-post-id="' + post.id + '">' +
+                    '<div class="post-header">' +
+                        '<div class="post-avatar">' +
+                            (post.userAvatar ? '<img src="' + post.userAvatar + '" alt="">' : '<div class="post-avatar-letter">' + (post.userName || 'C').charAt(0).toUpperCase() + '</div>') +
+                        '</div>' +
+                        '<div class="post-author">' +
+                            '<strong>' + escapeHtmlText(post.userName || 'Channel') + '</strong>' +
+                            '<span>' + timeAgo + ' ago</span>' +
+                        '</div>' +
+                        // Delete button uses CLIENT-SIDE isOwnerUser, not server isOwner.
+                        (isOwnerUser ? '<button class="post-delete-btn" onclick="deletePost(\\'' + post.id + '\\')" title="Delete post"><i class="fas fa-trash"></i></button>' : '') +
+                    '</div>' +
+                    (post.text ? '<div class="post-text">' + escapeHtmlText(post.text) + '</div>' : '') +
+                    (post.imageUrl ? '<div class="post-image"><img src="' + post.imageUrl + '" alt="Community post image" loading="lazy"></div>' : '') +
+                    (hasPrompt ? '<div class="post-prompt-box">' +
+                        '<div class="post-prompt-label"><i class="fas fa-magic"></i> AI Prompt</div>' +
+                        '<div class="post-prompt-text" id="prompt-' + post.id + '">' + escapeHtmlText(post.promptText) + '</div>' +
+                        '<button class="post-copy-prompt-btn" onclick="copyPostPrompt(event, \\'' + post.id + '\\')"><i class="fas fa-copy"></i> Copy</button>' +
+                    '</div>' : '') +
+                    '<div class="post-actions">' +
+                        '<div class="post-reactions">' + reactionsHTML + '</div>' +
+                        '<button class="post-comment-toggle" onclick="toggleComments(\\'' + post.id + '\\')">' +
+                            '<i class="far fa-comment"></i> <span id="comment-count-' + post.id + '">' + (post.commentCount || 0) + '</span>' +
+                        '</button>' +
+                    '</div>' +
+                    '<div class="post-comments" id="comments-' + post.id + '" style="display:none;">' +
+                        '<div class="comments-list" id="comments-list-' + post.id + '"></div>' +
+                        (currentUser ?
+                            '<div class="comment-input-row">' +
+                                '<input type="text" class="comment-input" id="comment-input-' + post.id + '" placeholder="Write a comment..." maxlength="1000" onkeydown="if(event.key===\\'Enter\\')submitComment(\\'' + post.id + '\\')">' +
+                                '<button class="comment-submit" onclick="submitComment(\\'' + post.id + '\\')"><i class="fas fa-paper-plane"></i></button>' +
+                            '</div>'
+                            :
+                            '<div class="comment-login-prompt"><a href="' + loginUrl + '"><i class="fas fa-sign-in-alt"></i> Login to comment</a></div>'
+                        ) +
+                    '</div>' +
+                '</div>';
+            }).join('');
+        }
+
+        async function toggleReaction(event, postId, emoji) {
+            if (event) event.stopPropagation();
+            if (!currentUser) { window.location.href = '/login.html?returnUrl=' + encodeURIComponent(window.location.href); return; }
+
+            const post = communityPosts.find(p => p.id === postId);
+            if (!post) return;
+
+            const reactions = post.reactions || {};
+            const users = reactions[emoji] || [];
+            const isActive = users.includes(currentUser.uid);
+            const action = isActive ? 'remove' : 'add';
+
+            if (action === 'add') {
+                if (!reactions[emoji]) reactions[emoji] = [];
+                reactions[emoji].push(currentUser.uid);
+            } else {
+                reactions[emoji] = users.filter(id => id !== currentUser.uid);
+                if (reactions[emoji].length === 0) delete reactions[emoji];
+            }
+            post.reactions = reactions;
+            renderCommunityPosts();
+
+            try {
+                const token = await currentUser.getIdToken();
+                const response = await fetch('/api/community/' + postId + '/react', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+                    body: JSON.stringify({ emoji, action })
+                });
+                const data = await response.json();
+                if (data.success) { post.reactions = data.reactions || {}; renderCommunityPosts(); }
+            } catch (e) { console.error('Reaction error:', e); }
+        }
+
+        async function toggleComments(postId) {
+            const commentsEl = document.getElementById('comments-' + postId);
+            if (!commentsEl) return;
+            if (commentsEl.style.display === 'none') {
+                commentsEl.style.display = 'block';
+                await loadComments(postId);
+            } else {
+                commentsEl.style.display = 'none';
+            }
+        }
+
+        async function loadComments(postId) {
+            const list = document.getElementById('comments-list-' + postId);
+            if (!list) return;
+            list.innerHTML = '<div class="comments-loading"><div class="spinner"></div></div>';
+
+            try {
+                const response = await fetch('/api/community/' + postId + '/comments');
+                const data = await response.json();
+
+                if (data.success && data.comments && data.comments.length > 0) {
+                    list.innerHTML = data.comments.map(c =>
+                        '<div class="comment-item">' +
+                            '<div class="comment-avatar">' +
+                                (c.userAvatar ? '<img src="' + c.userAvatar + '" alt="">' : '<div class="comment-avatar-letter">' + (c.userName || 'U').charAt(0).toUpperCase() + '</div>') +
+                            '</div>' +
+                            '<div class="comment-body">' +
+                                '<div class="comment-author"><strong>' + escapeHtmlText(c.userName || 'User') + '</strong><span>' + getTimeAgo(c.createdAt) + ' ago</span></div>' +
+                                '<div class="comment-text">' + escapeHtmlText(c.text) + '</div>' +
+                            '</div>' +
+                        '</div>'
+                    ).join('');
+                } else {
+                    list.innerHTML = '<div class="no-comments-yet">Be the first to comment!</div>';
+                }
+            } catch (e) {
+                console.error('Load comments error:', e);
+                list.innerHTML = '<div class="no-comments-yet">Failed to load comments</div>';
+            }
+        }
+
+        async function submitComment(postId) {
+            if (!currentUser) { window.location.href = '/login.html?returnUrl=' + encodeURIComponent(window.location.href); return; }
+            const input = document.getElementById('comment-input-' + postId);
+            if (!input) return;
+            const text = input.value.trim();
+            if (!text) return;
+
+            input.disabled = true;
+            try {
+                const token = await currentUser.getIdToken();
+                const response = await fetch('/api/community/' + postId + '/comment', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+                    body: JSON.stringify({ text })
+                });
+                const data = await response.json();
+
+                if (data.success) {
+                    input.value = '';
+                    await loadComments(postId);
+
+                    const post = communityPosts.find(p => p.id === postId);
+                    if (post) {
+                        post.commentCount = (post.commentCount || 0) + 1;
+                        const countEl = document.getElementById('comment-count-' + postId);
+                        if (countEl) countEl.textContent = post.commentCount;
+                    }
+                } else { alert(data.error || 'Failed to post comment'); }
+            } catch (e) { alert('Failed to post comment'); }
+            finally { input.disabled = false; }
+        }
+
+        async function copyPostPrompt(event, postId) {
+            if (event) event.stopPropagation();
+            const el = document.getElementById('prompt-' + postId);
+            if (!el) return;
+            const text = el.textContent;
+            try {
+                await navigator.clipboard.writeText(text);
+                const btn = event && event.target ? event.target.closest('.post-copy-prompt-btn') : null;
+                if (btn) {
+                    const orig = btn.innerHTML;
+                    btn.innerHTML = '<i class="fas fa-check"></i> Copied!';
+                    btn.classList.add('copied');
+                    setTimeout(() => { btn.innerHTML = orig; btn.classList.remove('copied'); }, 2000);
+                }
+            } catch (e) { alert('Copy failed. Please try selecting manually.'); }
+        }
+
+        async function deletePost(postId) {
+            if (!confirm('Delete this post? This action cannot be undone.')) return;
+            if (!currentUser) return;
+            try {
+                const token = await currentUser.getIdToken();
+                const response = await fetch('/api/community/' + postId, {
+                    method: 'DELETE',
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                const data = await response.json();
+                if (data.success) {
+                    communityPosts = communityPosts.filter(p => p.id !== postId);
+                    renderCommunityPosts();
+                    if (communityPosts.length === 0) loadCommunityPosts();
+                } else { alert(data.error || 'Failed to delete post'); }
+            } catch (e) { alert('Failed to delete post'); }
+        }
+
+        // ==================== CREATE POST MODAL ====================
+        (function setupCreatePostModal() {
+            const modal = document.getElementById('createPostModal');
+            if (!modal) {
+                console.warn('Create post modal not found');
+                return;
+            }
+
+            const openBtn = document.getElementById('openCreatePostBtn');
+            const closeBtn = document.getElementById('closeCreatePostModal');
+            const cancelBtn = document.getElementById('cancelPostBtn');
+            const submitBtnEl = document.getElementById('submitPostBtn');
+            const imageInput = document.getElementById('postImageInput');
+            const previewEl = document.getElementById('postImagePreview');
+            const previewImg = document.getElementById('postImagePreviewImg');
+            const removeBtn = document.getElementById('removePostImage');
+
+            function closeModal() {
+                modal.classList.remove('active');
+                document.body.style.overflow = '';
+                document.getElementById('postTextInput').value = '';
+                document.getElementById('postPromptInput').value = '';
+                imageInput.value = '';
+                previewEl.style.display = 'none';
+                previewImg.src = '';
+            }
+
+            if (openBtn) openBtn.addEventListener('click', () => {
+                if (!isOwnerUser) {
+                    alert('Only the channel owner can create community posts.');
+                    return;
+                }
+                modal.classList.add('active');
+                document.body.style.overflow = 'hidden';
+            });
+            if (closeBtn) closeBtn.addEventListener('click', closeModal);
+            if (cancelBtn) cancelBtn.addEventListener('click', closeModal);
+            modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
+
+            if (imageInput) {
+                imageInput.addEventListener('change', function() {
+                    const file = this.files[0];
+                    if (file) {
+                        const reader = new FileReader();
+                        reader.onload = (e) => {
+                            previewImg.src = e.target.result;
+                            previewEl.style.display = 'block';
+                        };
+                        reader.readAsDataURL(file);
+                    }
+                });
+            }
+            if (removeBtn) {
+                removeBtn.addEventListener('click', () => {
+                    imageInput.value = '';
+                    previewEl.style.display = 'none';
+                    previewImg.src = '';
+                });
+            }
+
+            if (submitBtnEl) {
+                submitBtnEl.addEventListener('click', async () => {
+                    if (!currentUser) {
+                        window.location.href = '/login.html?returnUrl=' + encodeURIComponent(window.location.href);
+                        return;
+                    }
+                    if (!isOwnerUser) {
+                        alert('Only the channel owner can create community posts.');
+                        return;
+                    }
+
+                    const text = document.getElementById('postTextInput').value.trim();
+                    const promptText = document.getElementById('postPromptInput').value.trim();
+                    const imageFile = imageInput.files[0];
+
+                    if (!text && !promptText && !imageFile) {
+                        alert('Please add text, a prompt, or an image before posting.');
+                        return;
+                    }
+
+                    submitBtnEl.disabled = true;
+                    const orig = submitBtnEl.innerHTML;
+                    submitBtnEl.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Posting...';
+
+                    try {
+                        const token = await currentUser.getIdToken();
+                        const formData = new FormData();
+                        formData.append('text', text);
+                        formData.append('promptText', promptText);
+                        if (imageFile) formData.append('image', imageFile);
+
+                        const response = await fetch('/api/channel/' + channelId + '/community', {
+                            method: 'POST',
+                            headers: { 'Authorization': 'Bearer ' + token },
+                            body: formData
+                        });
+                        const data = await response.json();
+
+                        if (data.success) {
+                            closeModal();
+                            await loadCommunityPosts();
+                        } else {
+                            alert(data.error || 'Failed to create post');
+                        }
+                    } catch (e) {
+                        console.error('Create post error:', e);
+                        alert('Failed to create post. Please try again.');
+                    } finally {
+                        submitBtnEl.disabled = false;
+                        submitBtnEl.innerHTML = orig;
+                    }
+                });
+            }
+        })();
+
+        // Auto-load community if URL hash points to it
+        if (window.location.hash === '#community') {
+            const communityTab = document.querySelector('.content-tab[data-tab="community"]');
+            if (communityTab) communityTab.click();
+        }
+
+        console.log('Channel page loaded with client-side ownership resolution.');
+    </script>
+</body>
+</html>`;
+}
+app.get('/channel/:identifier', async (req, res) => {
+  try {
+    const identifier = req.params.identifier;
+    const baseUrl = process.env.BASE_URL || `https://${req.get('host')}`;
+    let channel = null;
+    let channelId = null;
+    let prompts = [];
+    let isSubscribed = false;
+    let currentUserId = null;
+
+    // Best-effort: if the request happens to carry a Bearer token (e.g. fetch()).
+    // NOTE: normal browser navigation never sends this header, so we do NOT rely on it
+    // for rendering owner-only UI. Ownership is resolved client-side after Firebase auth.
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      try {
+        const idToken = authHeader.split('Bearer ')[1];
+        const decodedToken = await admin.auth().verifyIdToken(idToken);
+        currentUserId = decodedToken.uid;
+      } catch (e) { /* ignore */ }
     }
+
+    // ---- Look up the channel ----
+    if (db && db.collection) {
+      let query = null;
+      if (identifier.startsWith('@')) {
+        query = db.collection('channels').where('channelHandle', '==', identifier);
+      } else {
+        // Try as document ID first, then as customUrl
+        const docSnapshot = await db.collection('channels').doc(identifier).get();
+        if (docSnapshot.exists) {
+          channelId = identifier;
+          channel = docSnapshot.data();
+        } else {
+          query = db.collection('channels').where('customUrl', '==', identifier);
+        }
+      }
+      if (!channel && query) {
+        const snapshot = await query.get();
+        if (!snapshot.empty) {
+          const doc = snapshot.docs[0];
+          channelId = doc.id;
+          channel = doc.data();
+        }
+      }
+    }
+
+    if (!channel) {
+      return res.status(404).send(`<!DOCTYPE html><html><head><title>Channel Not Found</title></head><body><h1>Channel Not Found</h1><p>The channel you're looking for doesn't exist.</p><a href="/">Return Home</a></body></html>`);
+    }
+
+    // ---- Load prompts for this channel ----
+    if (db && db.collection) {
+      const promptSnapshot = await db.collection('uploads')
+        .where('userId', '==', channel.userId)
+        .orderBy('createdAt', 'desc')
+        .limit(100)
+        .get();
+      prompts = promptSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        createdAt: safeDateToString(doc.data().createdAt)
+      }));
+    }
+
+    // ---- Subscription status (only if we truly know the user via header) ----
+    if (currentUserId && channelId && db && db.collection) {
+      const subStatus = await db.collection('channels').doc(channelId).get();
+      if (subStatus.exists) {
+        const data = subStatus.data();
+        isSubscribed = (data.subscriberIds || []).includes(currentUserId);
+      }
+    }
+
+    // ---- Canonical URL ----
+    let canonicalPath;
+    if (identifier.startsWith('@')) canonicalPath = `/channel/${identifier}`;
+    else if (channel.customUrl) canonicalPath = `/channel/${channel.customUrl}`;
+    else if (channel.channelHandle) canonicalPath = `/channel/${channel.channelHandle}`;
+    else canonicalPath = `/channel/${channelId}`;
+    const canonicalUrl = baseUrl + canonicalPath;
+
+    // NOTE: `isOwner` is intentionally NOT computed here anymore.
+    // Ownership is resolved on the client after Firebase auth completes.
+    const html = generateChannelHTML(channel, channelId, prompts, isSubscribed, currentUserId, canonicalUrl);
+    res.set('Content-Type', 'text/html');
+    res.send(html);
+  } catch (error) {
+    console.error('❌ Channel page error:', error);
+    res.status(500).send(`<h1>Error</h1><p>Failed to load channel page.</p><a href="/">Return Home</a>`);
+  }
 });
-`;
-}
-
-// Helper to generate affiliate HTML
-function generateAffiliateHTML(affiliate) {
-  if (!affiliate) return '';
-  return `
-    <div class="affiliate-container">
-      <div class="ad-label">🌟 Sponsored</div>
-      <a href="${affiliate.url}" target="_blank" rel="noopener sponsored" class="affiliate-link">
-        ${affiliate.image ? `<img src="${affiliate.image}" alt="${affiliate.title}" class="affiliate-image" onerror="this.style.display='none'">` : ''}
-        <div class="affiliate-info">
-          <h4>${affiliate.title}</h4>
-          ${affiliate.description ? `<p>${affiliate.description}</p>` : ''}
-          <span class="affiliate-cta">View Product →</span>
-        </div>
-      </a>
-    </div>
-  `;
-}
-
-// ==================== UPDATED generateEnhancedPromptHTML ====================
-function generateEnhancedPromptHTML(promptData, affiliates) {
+// ==================== ENHANCED PROMPT PAGE GENERATOR ====================
+function generateEnhancedPromptHTML(promptData, affiliates, creatorChannel = null) {
   const prompt = promptData;
   const baseUrl = 'https://www.toolsprompt.com';
   const promptUrl = baseUrl + '/prompt/' + promptData.id;
   const gaId = process.env.GOOGLE_ANALYTICS_ID || 'G-K4KXR4FZCP';
   const isVideo = promptData.fileType === 'video' || promptData.videoUrl || promptData.category === 'video';
-  
   const platformInfo = promptData.platformInfo || { name: 'AI Platform', strengths: [] };
-  
+
+  const hasChannel = !!(creatorChannel && (
+    creatorChannel.channelHandle ||
+    creatorChannel.customUrl ||
+    creatorChannel.id
+  ));
+
+  const channelHandleForUrl =
+    (creatorChannel?.channelHandle && creatorChannel.channelHandle.trim())
+      ? creatorChannel.channelHandle.trim()
+      : (creatorChannel?.customUrl && creatorChannel.customUrl.trim())
+        ? creatorChannel.customUrl.trim()
+        : (creatorChannel?.id || '');
+
+  const escapeHtml = (s) => String(s || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  const safeChannelName =
+    escapeHtml(creatorChannel?.channelName) ||
+    escapeHtml(creatorChannel?.channelHandle) ||
+    escapeHtml(promptData.userName) ||
+    'Anonymous';
+
+  const safeChannelHandle = creatorChannel?.channelHandle
+    ? escapeHtml(creatorChannel.channelHandle)
+    : '';
+
+  const displayCreator = hasChannel
+    ? `<a href="/channel/${channelHandleForUrl}"
+         style="color:#4e54c8; text-decoration:none; font-weight:600;"
+         onclick="event.stopPropagation();">
+       ${safeChannelName}${safeChannelHandle ? ` <span style="color:#888; font-weight:500;">(${safeChannelHandle})</span>` : ''}
+     </a>`
+    : escapeHtml(promptData.userName) || 'Anonymous';
+
   const googleAnalyticsCode = `
     <script async src="https://www.googletagmanager.com/gtag/js?id=${gaId}"></script>
     <script>
@@ -6746,535 +7286,47 @@ function generateEnhancedPromptHTML(promptData, affiliates) {
     </script>
   `;
 
-  // Generate Adsterra ads for prompt pages
   const adsterraAds = generateAllAdsterraAds();
 
-  const mediaDisplay = isVideo ? `
-    <div class="shorts-video-container">
-      <video 
-        src="${promptData.videoUrl || promptData.mediaUrl}" 
-        poster="${promptData.imageUrl}"
-        class="shorts-image"
-        controls
-        loop
-        playsinline
-        preload="metadata"
-        onerror="this.style.display='none'; document.getElementById('videoFallback').style.display='flex';"
-      ></video>
-      <div id="videoFallback" style="display:none; position:absolute; top:0; left:0; right:0; bottom:0; background:#000; color:white; align-items:center; justify-content:center; flex-direction:column;">
-        <i class="fas fa-exclamation-triangle" style="font-size:2rem; margin-bottom:1rem;"></i>
-        <p>Video failed to load. Try refreshing.</p>
-      </div>
-      ${promptData.videoDuration ? `<span class="video-duration">${promptData.videoDuration}s</span>` : ''}
-    </div>
-  ` : `
-    <img src="${promptData.imageUrl}" 
-         alt="${promptData.title} - AI Generated Image" 
-         class="prompt-image"
-         onerror="this.src='https://via.placeholder.com/800x400/4e54c8/ffffff?text=AI+Generated+Image'"
-         id="promptImage">
-  `;
 
-  const platformBadge = `
-    <div class="ai-model-badge">
-      <i class="fas fa-${isVideo ? 'video' : 'camera'}"></i> ${platformInfo.name || (isVideo ? 'AI Video' : 'AI Image')}
-    </div>
-  `;
+  const socialBadgesHTML = `
+<div class="social-badges-container" id="socialBadgesContainer">
+    <button class="social-badges-toggle" id="socialToggleBtn" aria-label="Toggle social badges"><i class="fas fa-chevron-up"></i></button>
+    <a href="https://instagram.com/toolsprompt" target="_blank" class="social-badge instagram-badge" rel="noopener noreferrer"><i class="fab fa-instagram"></i><span class="followers-text">Follow on Insta</span></a>
+    <a href="https://youtube.com/@toolsprompt" target="_blank" class="social-badge youtube-badge" rel="noopener noreferrer"><i class="fab fa-youtube"></i><span class="followers-text">Subscribe On YT</span></a>
+    <a href="https://wa.me/yourwhatsappnumber" target="_blank" class="social-badge whatsapp-badge" rel="noopener noreferrer"><i class="fab fa-whatsapp"></i><span class="followers-text">Join Whatsapp</span></a>
+</div>
+`;
 
-  const priceBadge = promptData.isPaid ? `
-    <div class="price-badge">
-      <i class="fas fa-rupee-sign"></i> ${promptData.price}
-    </div>
-  ` : `
-    <div class="price-badge free">
-      <i class="fas fa-gift"></i> Free
-    </div>
-  `;
-
-  const aiStepsHTML = isVideo ? `
-    <div class="instruction-step">
-      <div class="step-number">1</div>
-      <div class="step-content">
-        <strong>Access the Platform:</strong> ${promptData.aiStepByStepGuide.access}
-      </div>
-    </div>
-    <div class="instruction-step">
-      <div class="step-number">2</div>
-      <div class="step-content">
-        <strong>Prepare Your Video Concept:</strong> ${promptData.aiStepByStepGuide.preparation}
-      </div>
-    </div>
-    <div class="instruction-step">
-      <div class="step-number">3</div>
-      <div class="step-content">
-        <strong>Use Your Prompt:</strong> ${promptData.aiStepByStepGuide.prompt}
-      </div>
-    </div>
-    <div class="instruction-step">
-      <div class="step-number">4</div>
-      <div class="step-content">
-        <strong>Adjust Parameters:</strong> ${promptData.aiStepByStepGuide.customization}
-      </div>
-    </div>
-    <div class="instruction-step">
-      <div class="step-number">5</div>
-      <div class="step-content">
-        <strong>Generate and Review:</strong> ${promptData.aiStepByStepGuide.generation}
-      </div>
-    </div>
-    <div class="instruction-step">
-      <div class="step-number">6</div>
-      <div class="step-content">
-        <strong>Export and Edit Further:</strong> ${promptData.aiStepByStepGuide.finalization}
-      </div>
-    </div>
-  ` : `
-    <div class="instruction-step">
-      <div class="step-number">1</div>
-      <div class="step-content">
-        <strong>Access the Platform:</strong> ${promptData.aiStepByStepGuide.access}
-      </div>
-    </div>
-    <div class="instruction-step">
-      <div class="step-number">2</div>
-      <div class="step-content">
-        <strong>Prepare Your Input:</strong> ${promptData.aiStepByStepGuide.preparation}
-      </div>
-    </div>
-    <div class="instruction-step">
-      <div class="step-number">3</div>
-      <div class="step-content">
-        <strong>Use Your Prompt:</strong> ${promptData.aiStepByStepGuide.prompt}
-      </div>
-    </div>
-    <div class="instruction-step">
-      <div class="step-number">4</div>
-      <div class="step-content">
-        <strong>Customize Details:</strong> ${promptData.aiStepByStepGuide.customization}
-      </div>
-    </div>
-    <div class="instruction-step">
-      <div class="step-number">5</div>
-      <div class="step-content">
-        <strong>Generate and Refine:</strong> ${promptData.aiStepByStepGuide.generation}
-      </div>
-    </div>
-    <div class="instruction-step">
-      <div class="step-number">6</div>
-      <div class="step-content">
-        <strong>Finalize and Export:</strong> ${promptData.aiStepByStepGuide.finalization}
-      </div>
-    </div>
-  `;
-
-  const aiExpertTipsHTML = (promptData.aiExpertTips || []).map(tip => `
-    <li>${tip}</li>
-  `).join('');
-
-  const toolsHTML = (promptData.bestAITools || []).map(tool => `
-    <div class="tool-card-enhanced ${tool.isPrimary ? 'primary-tool' : ''}">
-      <h4>
-        ${tool.name}
-        <div class="tool-rating">
-          ${Array(tool.rating || 4).fill('<i class="fas fa-star"></i>').join('')}
-          ${Array(5 - (tool.rating || 4)).fill('<i class="far fa-star"></i>').join('')}
-        </div>
-      </h4>
-      <p>${tool.description}</p>
-      <div class="tool-tags">
-        ${(tool.strengths || tool.category || []).map(tag => `<span class="tool-tag">${tag}</span>`).join('')}
-      </div>
-    </div>
-  `).join('');
-
-  const tipsHTML = (promptData.usageTips || []).map(tip => `
-    <li>${tip}</li>
-  `).join('');
-
-  const seoTipsHTML = (promptData.seoTips || []).map(tip => `
-    <li>${tip}</li>
-  `).join('');
-
-  // Add download app button HTML at the end of body
   const downloadAppButtonHTMLWithStyle = `
-    <!-- Floating Download App Button -->
-    <style>${downloadAppCSS}</style>
-    <button class="floating-download-btn" id="downloadAppBtn" onclick="downloadApp()">
-        <i class="fas fa-download"></i>
-        <span class="btn-text">Download App</span>
-        <span class="btn-badge">FREE</span>
-    </button>
-  `;
+<style>${downloadAppCSS}</style>
+<button class="floating-download-btn" id="downloadAppBtn" onclick="downloadApp()">
+    <i class="fas fa-download"></i>
+    <span class="btn-text">Download App</span>
+    <span class="btn-badge">FREE</span>
+</button>
+`;
 
-  // Download App JavaScript function to be added
-  const downloadAppJS = `
-    // ==================== DOWNLOAD APP FUNCTION ====================
-    
-    function downloadApp() {
-        const appUrl = 'https://apk.e-droid.net/apk/app4057785-93607p.apk?v=2';
-        
-        // Track download click for analytics
-        try {
-            fetch('/api/track-download', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    promptId: '${promptData.id}',
-                    promptTitle: '${promptData.title.replace(/'/g, "\\'")}',
-                    timestamp: new Date().toISOString(),
-                    userAgent: navigator.userAgent
-                })
-            }).catch(err => console.log('Download tracking error:', err));
-        } catch(e) {}
-        
-        // Show download started notification
-        showDownloadNotification();
-        
-        // Open download URL
-        window.open(appUrl, '_blank');
-    }
-
-    function showDownloadNotification() {
-        const notification = document.createElement('div');
-        notification.className = 'download-notification';
-        notification.innerHTML = \`
-            <i class="fas fa-check-circle"></i>
-            <span>Download started! Check your browser.</span>
-        \`;
-        notification.style.cssText = \`
-            position: fixed;
-            bottom: 100px;
-            left: 50%;
-            transform: translateX(-50%);
-            background: #20bf6b;
-            color: white;
-            padding: 10px 20px;
-            border-radius: 50px;
-            z-index: 10001;
-            font-size: 0.9rem;
-            font-weight: 500;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
-            animation: slideUpFade 0.3s ease;
-            white-space: nowrap;
-        \`;
-        document.body.appendChild(notification);
-        
-        setTimeout(() => {
-            notification.style.opacity = '0';
-            notification.style.transform = 'translateX(-50%) translateY(-10px)';
-            setTimeout(() => notification.remove(), 300);
-        }, 3000);
-    }
-
-    // Optional: Hide button when user scrolls down (or keep sticky - your choice)
-    let lastScrollY = window.scrollY;
-    let hideTimeout;
-
-    function handleDownloadButtonVisibility() {
-        const downloadBtn = document.getElementById('downloadAppBtn');
-        if (!downloadBtn) return;
-        
-        // Button stays sticky (doesn't move) - just ensure it's visible
-        // This keeps it always visible at bottom center
-        
-        // Optional: Add scroll-based animation
-        const currentScrollY = window.scrollY;
-        if (Math.abs(currentScrollY - lastScrollY) > 10) {
-            downloadBtn.style.opacity = '0.7';
-            clearTimeout(hideTimeout);
-            hideTimeout = setTimeout(() => {
-                downloadBtn.style.opacity = '1';
-            }, 300);
-        }
-        lastScrollY = currentScrollY;
-    }
-
-    window.addEventListener('scroll', handleDownloadButtonVisibility);
-
-    // Add pulse effect on page load
-    setTimeout(() => {
-        const btn = document.getElementById('downloadAppBtn');
-        if (btn) {
-            btn.style.animation = 'none';
-            setTimeout(() => {
-                btn.style.animation = 'slideUpFade 0.5s ease-out, pulse 0.5s ease-in-out 2';
-            }, 10);
-        }
-    }, 500);
-  `;
-
-  // ---- AFFILIATE PLACEMENT ----
-  const affiliateTop = affiliates[0] ? generateAffiliateHTML(affiliates[0]) : '';
-  const affiliateMiddle = affiliates[1] ? generateAffiliateHTML(affiliates[1]) : '';
-  const affiliateBottom = affiliates[2] ? generateAffiliateHTML(affiliates[2]) : '';
-
-  // ==================== AI GENERATOR STICKY BAR CSS ====================
-  const aiGeneratorCSS = `
-/* Sticky AI Generator Bar */
-.ai-generator-bar {
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    background: rgba(255, 255, 255, 0.98);
-    backdrop-filter: blur(10px);
-    border-top: 1px solid #e9ecef;
-    padding: 12px 20px;
-    display: none;
-    align-items: flex-start;
-    gap: 12px;
-    z-index: 9999;
-    box-shadow: 0 -4px 20px rgba(0,0,0,0.1);
-    transition: transform 0.3s ease;
-}
-.ai-generator-bar.active {
-    display: flex;
-}
-.ai-generator-input {
-    flex: 1;
-    min-height: 44px;
-    max-height: 120px;
-    padding: 10px 15px;
-    border: 2px solid #e9ecef;
-    border-radius: 24px;
-    font-size: 0.95rem;
-    resize: none;
-    outline: none;
-    transition: border-color 0.3s ease;
-    font-family: inherit;
-    background: white;
-}
-.ai-generator-input:focus {
-    border-color: #4e54c8;
-}
-.ai-generator-actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-shrink: 0;
-}
-.ai-image-upload-btn {
-    background: #f1f3f5;
-    border: none;
-    width: 44px;
-    height: 44px;
-    border-radius: 50%;
-    font-size: 1.4rem;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: all 0.3s ease;
-    color: #495057;
-}
-.ai-image-upload-btn:hover {
-    background: #4e54c8;
-    color: white;
-    transform: scale(1.05);
-}
-.ai-generate-btn {
-    background: linear-gradient(135deg, #4e54c8, #8f94fb);
-    border: none;
-    width: 44px;
-    height: 44px;
-    border-radius: 50%;
-    color: white;
-    font-size: 1.2rem;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: all 0.3s ease;
-    box-shadow: 0 4px 12px rgba(78,84,200,0.3);
-}
-.ai-generate-btn:hover {
-    transform: scale(1.05);
-    box-shadow: 0 6px 20px rgba(78,84,200,0.5);
-}
-.ai-generate-btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-    transform: none;
-}
-.ai-credit-display {
-    font-size: 0.8rem;
-    color: #495057;
-    padding: 0 8px;
-    white-space: nowrap;
-    display: flex;
-    align-items: center;
-    gap: 4px;
-}
-.ai-credit-display .credits-num {
-    font-weight: 700;
-    color: #4e54c8;
-}
-.ai-credit-display .credits-free {
-    color: #20bf6b;
-}
-.ai-credit-display .credits-paid {
-    color: #ff6b6b;
-}
-.ai-file-input {
-    display: none;
-}
-.ai-image-preview {
-    display: none;
-    position: relative;
-    width: 44px;
-    height: 44px;
-    border-radius: 8px;
-    overflow: hidden;
-    flex-shrink: 0;
-    border: 2px solid #4e54c8;
-}
-.ai-image-preview img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-}
-.ai-image-preview .remove-image {
-    position: absolute;
-    top: -6px;
-    right: -6px;
-    background: #ff6b6b;
-    color: white;
-    border: none;
-    border-radius: 50%;
-    width: 18px;
-    height: 18px;
-    font-size: 10px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-/* Generated Image Modal */
-.generated-modal {
-    display: none;
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: rgba(0,0,0,0.85);
-    z-index: 99999;
-    align-items: center;
-    justify-content: center;
-    padding: 20px;
-}
-.generated-modal.active {
-    display: flex;
-}
-.generated-modal-content {
-    max-width: 90%;
-    max-height: 90%;
-    position: relative;
-}
-.generated-modal-content img {
-    max-width: 100%;
-    max-height: 90vh;
-    border-radius: 12px;
-    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
-}
-.generated-modal-close {
-    position: absolute;
-    top: -40px;
-    right: -40px;
-    background: white;
-    border: none;
-    width: 40px;
-    height: 40px;
-    border-radius: 50%;
-    font-size: 1.5rem;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #333;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
-}
-.generated-modal-close:hover {
-    background: #ff6b6b;
-    color: white;
-}
-.generated-modal-download {
-    position: absolute;
-    bottom: -50px;
-    left: 50%;
-    transform: translateX(-50%);
-    background: #4e54c8;
-    color: white;
-    border: none;
-    padding: 10px 24px;
-    border-radius: 30px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background 0.3s ease;
-}
-.generated-modal-download:hover {
-    background: #3f44b8;
-}
-@media (max-width: 768px) {
-    .ai-generator-bar {
-        padding: 10px 12px;
-        gap: 8px;
-        flex-wrap: wrap;
-    }
-    .ai-generator-input {
-        font-size: 0.9rem;
-        min-height: 38px;
-    }
-    .ai-generator-actions {
-        gap: 4px;
-    }
-    .ai-image-upload-btn, .ai-generate-btn {
-        width: 38px;
-        height: 38px;
-        font-size: 1rem;
-    }
-    .ai-credit-display {
-        font-size: 0.7rem;
-    }
-    .generated-modal-close {
-        top: 10px;
-        right: 10px;
-        width: 34px;
-        height: 34px;
-        font-size: 1.2rem;
-    }
-    .generated-modal-download {
-        bottom: -40px;
-        padding: 8px 16px;
-        font-size: 0.9rem;
-    }
-}
-  `;
-
-  // ==================== AI GENERATOR STICKY BAR HTML ====================
   const aiGeneratorHTML = `
-<!-- AI Generator Sticky Bar -->
 <div class="ai-generator-bar" id="aiGeneratorBar">
     <textarea class="ai-generator-input" id="aiPromptInput" placeholder="Describe the image you want to generate..." rows="1"></textarea>
     <div class="ai-generator-actions">
-        <div class="ai-image-preview" id="aiImagePreview">
-            <img id="aiPreviewImg" src="" alt="Uploaded preview">
-            <button class="remove-image" id="aiRemoveImage">&times;</button>
-        </div>
-        <button class="ai-image-upload-btn" id="aiImageUploadBtn" title="Upload an image for reference">
-            <i class="fas fa-plus"></i>
-        </button>
+        <div class="ai-image-preview" id="aiImagePreview"><img id="aiPreviewImg" src="" alt="Uploaded preview"><button class="remove-image" id="aiRemoveImage">&times;</button></div>
+        <button class="ai-image-upload-btn" id="aiImageUploadBtn" title="Upload an image for reference"><i class="fas fa-plus"></i></button>
         <input type="file" class="ai-file-input" id="aiFileInput" accept="image/*">
-        <span class="ai-credit-display" id="aiCreditDisplay">
-            <i class="fas fa-coins"></i> <span class="credits-num" id="aiCreditsCount">0</span> credits
-        </span>
-        <button class="ai-generate-btn" id="aiGenerateBtn" title="Generate Image">
-            <i class="fas fa-arrow-right"></i>
-        </button>
+        <div class="duration-option" style="display:flex; align-items:center; gap:6px; background:#f8f9fa; padding:4px 10px; border-radius:20px; flex-shrink:0;">
+            <i class="fas fa-clock" style="color:#666; font-size:0.8rem;"></i>
+            <input type="range" id="aiDurationSlider" min="3" max="40" value="5" step="1" style="width:60px; height:4px; background:#4e54c8; border-radius:2px; outline:none; cursor:pointer;">
+            <span id="aiDurationDisplay" style="font-size:0.7rem; font-weight:600; color:#4e54c8; min-width:28px; text-align:center;">5s</span>
+        </div>
+        <div class="ai-mode-toggle-group">
+            <button class="ai-mode-option active" data-mode="image" id="aiModeImage"><i class="fas fa-image"></i> <span>Image</span></button>
+            <button class="ai-mode-option" data-mode="video" id="aiModeVideo"><i class="fas fa-video"></i> <span>Video</span></button>
+        </div>
+        <span class="ai-credit-display" id="aiCreditDisplay"><i class="fas fa-coins"></i> <span class="credits-num" id="aiCreditsCount">0</span> credits</span>
+        <button class="ai-generate-btn" id="aiGenerateBtn" title="Generate Image"><i class="fas fa-arrow-right"></i></button>
     </div>
 </div>
-
-<!-- Generated Image Modal -->
 <div class="generated-modal" id="generatedModal">
     <div class="generated-modal-content">
         <button class="generated-modal-close" id="generatedModalClose">&times;</button>
@@ -7282,33 +7334,115 @@ function generateEnhancedPromptHTML(promptData, affiliates) {
         <button class="generated-modal-download" id="generatedDownloadBtn">Download Image</button>
     </div>
 </div>
-
-<!-- Upgrade Modal (for credits) -->
 <div class="buy-modal-overlay" id="upgradeModal" style="display:none;">
     <div class="buy-modal" style="max-width:500px;">
-        <div class="modal-header">
-            <h2><i class="fas fa-gem"></i> Upgrade Credits</h2>
-            <button class="close-modal" id="upgradeModalClose">&times;</button>
-        </div>
+        <div class="modal-header"><h2><i class="fas fa-gem"></i> Upgrade Credits</h2><button class="close-modal" id="upgradeModalClose">&times;</button></div>
         <div class="buy-modal-content" style="grid-template-columns:1fr;padding:20px;">
             <div style="text-align:center;">
                 <p>You have <strong id="upgradeCurrentCredits">0</strong> credits left.</p>
                 <p>Get <strong>50 credits</strong> for just <strong>₹20</strong>!</p>
-                <button class="buy-now-btn" id="upgradePayBtn" style="margin-top:20px;">
-                    <i class="fas fa-rupee-sign"></i> Pay ₹20 for 50 credits
-                </button>
-                <p class="secure-payment" style="margin-top:15px;">
-                    <i class="fas fa-lock"></i> Secure payment via Razorpay
-                </p>
+                <button class="buy-now-btn" id="upgradePayBtn" style="margin-top:20px;"><i class="fas fa-rupee-sign"></i> Pay ₹20 for 50 credits</button>
+                <p class="secure-payment" style="margin-top:15px;"><i class="fas fa-lock"></i> Secure payment via Razorpay</p>
             </div>
         </div>
     </div>
 </div>
-  `;
+`;
 
-  // ==================== AI GENERATOR JAVASCRIPT ====================
+  const socialFeedHTML = `
+<div class="social-feed-container" id="socialFeed">
+    <button class="social-feed-toggle" id="feedToggle" onclick="toggleFeed()" aria-label="Toggle community feed"><i class="fas fa-chevron-left" id="feedToggleIcon"></i></button>
+    <div class="social-feed-panel">
+        <div class="feed-header"><h3><i class="fas fa-users"></i>Community</h3><button class="feed-close" onclick="toggleFeed()"><i class="fas fa-times"></i></button></div>
+        <div class="feed-tabs">
+            <button class="feed-tab active" data-tab="chat">💬 Chat</button>
+            <button class="feed-tab" data-tab="feed">📢 Feed</button>
+            <button class="feed-tab" data-tab="suggest">💡 Suggest</button>
+        </div>
+        <div class="feed-content">
+            <div class="feed-tab-content active" id="tab-chat">
+                <div class="chat-messages" id="chatMessages"></div>
+                <div class="chat-input-area">
+                    <div class="reply-indicator" id="replyIndicator" style="display:none;">Replying to <span id="replyUser"></span>: <span id="replyContent"></span><button onclick="cancelReply()"><i class="fas fa-times"></i></button></div>
+                    <div class="chat-input-row">
+                        <button class="sticker-btn" onclick="openStickerPicker()"><i class="fas fa-sticky-note"></i></button>
+                        <input type="text" id="chatInput" placeholder="Type a message...No Login Require" />
+                        <button onclick="sendChatMessage()"><i class="fas fa-paper-plane"></i></button>
+                    </div>
+                    <div class="sticker-picker" id="stickerPicker">
+                        <button onclick="sendSticker('😊')">😊</button>
+                        <button onclick="sendSticker('😂')">😂</button>
+                        <button onclick="sendSticker('❤️')">❤️</button>
+                        <button onclick="sendSticker('🔥')">🔥</button>
+                        <button onclick="sendSticker('👍')">👍</button>
+                        <button onclick="sendSticker('🎉')">🎉</button>
+                        <button onclick="sendSticker('💯')">💯</button>
+                        <button onclick="sendSticker('🤩')">🤩</button>
+                    </div>
+                </div>
+            </div>
+            <div class="feed-tab-content" id="tab-feed"><div class="activity-feed" id="activityFeed"></div></div>
+            <div class="feed-tab-content" id="tab-suggest">
+                <div class="suggest-area">
+                    <p>Have a prompt idea? Share it with the community!</p>
+                    <textarea id="suggestInput" rows="3" placeholder="Describe the prompt you'd like to see..."></textarea>
+                    <button onclick="submitSuggestion()">Submit Suggestion</button>
+                    <div class="suggest-notes" id="suggestNotes"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+`;
+
+
+
+  const downloadAppJS = `
+function downloadApp() {
+    const appUrl = 'https://apk.e-droid.net/apk/app4057785-93607p.apk?v=2';
+    try {
+        fetch('/api/track-download', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ promptId: '${promptData.id}', promptTitle: '${promptData.title.replace(/'/g, "\\'")}', timestamp: new Date().toISOString(), userAgent: navigator.userAgent })
+        }).catch(err => console.log('Download tracking error:', err));
+    } catch(e) {}
+    showDownloadNotification();
+    window.open(appUrl, '_blank');
+}
+function showDownloadNotification() {
+    const notification = document.createElement('div');
+    notification.className = 'download-notification';
+    notification.innerHTML = '<i class="fas fa-check-circle"></i><span>Download started! Check your browser.</span>';
+    notification.style.cssText = 'position:fixed;bottom:100px;left:50%;transform:translateX(-50%);background:#20bf6b;color:white;padding:10px 20px;border-radius:50px;z-index:10001;font-size:0.9rem;font-weight:500;box-shadow:0 4px 15px rgba(0,0,0,0.2);animation:slideUpFade 0.3s ease;white-space:nowrap;';
+    document.body.appendChild(notification);
+    setTimeout(() => {
+        notification.style.opacity = '0';
+        notification.style.transform = 'translateX(-50%) translateY(-10px)';
+        setTimeout(() => notification.remove(), 300);
+    }, 3000);
+}
+let lastScrollY = window.scrollY;
+let hideTimeout;
+function handleDownloadButtonVisibility() {
+    const downloadBtn = document.getElementById('downloadAppBtn');
+    if (!downloadBtn) return;
+    const currentScrollY = window.scrollY;
+    if (Math.abs(currentScrollY - lastScrollY) > 10) {
+        downloadBtn.style.opacity = '0.7';
+        clearTimeout(hideTimeout);
+        hideTimeout = setTimeout(() => { downloadBtn.style.opacity = '1'; }, 300);
+    }
+    lastScrollY = currentScrollY;
+}
+window.addEventListener('scroll', handleDownloadButtonVisibility);
+setTimeout(() => {
+    const btn = document.getElementById('downloadAppBtn');
+    if (btn) { btn.style.animation = 'none'; setTimeout(() => { btn.style.animation = 'slideUpFade 0.5s ease-out, pulse 0.5s ease-in-out 2'; }, 10); }
+}, 500);
+`;
+
   const aiGeneratorJS = `
-// ==================== AI GENERATOR STICKY BAR ====================
 (function() {
     const bar = document.getElementById('aiGeneratorBar');
     const promptInput = document.getElementById('aiPromptInput');
@@ -7327,143 +7461,196 @@ function generateEnhancedPromptHTML(promptData, affiliates) {
     const upgradeClose = document.getElementById('upgradeModalClose');
     const upgradePayBtn = document.getElementById('upgradePayBtn');
     const upgradeCurrent = document.getElementById('upgradeCurrentCredits');
-
+    const modeImageBtn = document.getElementById('aiModeImage');
+    const modeVideoBtn = document.getElementById('aiModeVideo');
+    let currentMode = 'image';
     let currentUserId = null;
-    let uploadedImage = null; // base64 or File
+    let uploadedImage = null;
     let isGenerating = false;
 
-    // Show bar only on prompt pages
+    if (!bar) { console.warn('AI Generator bar not found'); return; }
     bar.classList.add('active');
 
-    // Auto-resize textarea
-    promptInput.addEventListener('input', function() {
-        this.style.height = 'auto';
-        this.style.height = Math.min(this.scrollHeight, 120) + 'px';
-    });
+    promptInput.addEventListener('input', function() { this.style.height = 'auto'; this.style.height = Math.min(this.scrollHeight, 120) + 'px'; });
 
-    // Image upload
+    const durSlider = document.getElementById('aiDurationSlider');
+    const durDisplay = document.getElementById('aiDurationDisplay');
+    if (durSlider && durDisplay) durSlider.addEventListener('input', function() { durDisplay.textContent = this.value + 's'; });
+
     uploadBtn.addEventListener('click', () => fileInput.click());
     fileInput.addEventListener('change', function(e) {
         const file = this.files[0];
         if (file) {
             const reader = new FileReader();
-            reader.onload = function(ev) {
-                previewImg.src = ev.target.result;
-                previewContainer.style.display = 'block';
-                uploadedImage = file;
-            };
+            reader.onload = function(ev) { previewImg.src = ev.target.result; previewContainer.style.display = 'block'; uploadedImage = file; };
             reader.readAsDataURL(file);
         }
     });
-    removeImageBtn.addEventListener('click', function() {
-        previewContainer.style.display = 'none';
-        previewImg.src = '';
-        fileInput.value = '';
-        uploadedImage = null;
-    });
+    removeImageBtn.addEventListener('click', function() { previewContainer.style.display = 'none'; previewImg.src = ''; fileInput.value = ''; uploadedImage = null; });
 
-    // Fetch credits on load
     async function fetchCredits() {
         const user = await getCurrentUser();
         if (!user) {
-            creditDisplay.textContent = '0';
+            const stored = localStorage.getItem('guestUsage');
+            let usage = stored ? JSON.parse(stored) : null;
+            const today = new Date().toISOString().split('T')[0];
+            if (!usage || usage.date !== today) { usage = { date: today, count: 0 }; localStorage.setItem('guestUsage', JSON.stringify(usage)); }
+            creditDisplay.innerHTML = '<i class="fas fa-bolt"></i> ' + Math.max(0, 3 - usage.count) + ' free without login';
             return;
         }
         currentUserId = user.uid;
         try {
-            const res = await fetch(\`/api/credits/\${user.uid}\`);
+            const res = await fetch('/api/credits/' + user.uid);
             const data = await res.json();
-            if (data.success) {
-                creditDisplay.textContent = data.credits;
-            }
-        } catch(e) {
-            console.error('Credit fetch error', e);
-        }
+            if (data.success) creditDisplay.textContent = data.credits;
+        } catch(e) { console.error('Credit fetch error', e); }
     }
     fetchCredits();
 
-    // Generate
+    function setMode(mode) {
+        currentMode = mode;
+        modeImageBtn.classList.toggle('active', mode === 'image');
+        modeVideoBtn.classList.toggle('active', mode === 'video');
+        promptInput.placeholder = mode === 'image' ? 'Describe the image you want to generate...' : 'Describe the video you want to create...';
+        generateBtn.innerHTML = mode === 'image' ? '<i class="fas fa-arrow-right"></i>' : '<i class="fas fa-video"></i>';
+        fileInput.accept = 'image/*';
+    }
+    modeImageBtn.addEventListener('click', function() { if (currentMode !== 'image') setMode('image'); });
+    modeVideoBtn.addEventListener('click', function() { if (currentMode !== 'video') setMode('video'); });
+
     generateBtn.addEventListener('click', async function() {
         if (isGenerating) return;
         const prompt = promptInput.value.trim();
-        if (!prompt) {
-            showNotification('Please enter a prompt.', 'error');
-            return;
-        }
-
-        // Check login
+        if (!prompt) { showNotification('Please enter a prompt.', 'error'); return; }
         let user = await getCurrentUser();
-        if (!user) {
-            showNotification('Please login to generate images.', 'error');
-            // Redirect to login with return URL
-            const returnUrl = encodeURIComponent(window.location.href);
-            window.location.href = '/login.html?returnUrl=' + returnUrl;
-            return;
+        if (user) currentUserId = user.uid;
+        else currentUserId = null;
+        if (user) {
+            const creditInfo = await fetch('/api/credits/' + user.uid).then(r => r.json());
+            if (!creditInfo.success || creditInfo.credits <= 0) { upgradeCurrent.textContent = creditInfo.credits || 0; upgradeModal.style.display = 'flex'; return; }
+        } else {
+            const stored = localStorage.getItem('guestUsage');
+            let usage = stored ? JSON.parse(stored) : null;
+            const today = new Date().toISOString().split('T')[0];
+            if (!usage || usage.date !== today) { usage = { date: today, count: 0 }; localStorage.setItem('guestUsage', JSON.stringify(usage)); }
+            if (usage.count >= 3) { showGuestLimitModal(); return; }
         }
-        currentUserId = user.uid;
-
-        // Check credits
-        const creditInfo = await fetch(\`/api/credits/\${user.uid}\`).then(r => r.json());
-        if (!creditInfo.success || creditInfo.credits <= 0) {
-            // Show upgrade modal
-            upgradeCurrent.textContent = creditInfo.credits || 0;
-            upgradeModal.style.display = 'flex';
-            return;
-        }
-
-        // Proceed with generation
         isGenerating = true;
         generateBtn.disabled = true;
         generateBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
-
+        let statusEl = document.getElementById('generationStatus');
+        if (!statusEl) {
+            statusEl = document.createElement('div');
+            statusEl.id = 'generationStatus';
+            statusEl.style.cssText = 'font-size:0.9rem; color:#666; margin-top:5px; text-align:center;';
+            bar.parentNode.insertBefore(statusEl, bar.nextSibling);
+        }
+        statusEl.textContent = '⏳ Starting...';
         try {
             const formData = new FormData();
             formData.append('prompt', prompt);
-            if (uploadedImage) {
-                formData.append('image', uploadedImage);
-            }
-
-            const idToken = await user.getIdToken();
-            const response = await fetch('/api/generate-image', {
-                method: 'POST',
-                headers: { 'Authorization': \`Bearer \${idToken}\` },
-                body: formData
-            });
-
+            if (uploadedImage) formData.append('image', uploadedImage);
+            if (currentMode === 'video') { const durationVal = document.getElementById('aiDurationSlider')?.value || 5; formData.append('duration', durationVal); }
+            const headers = {};
+            if (user) { const idToken = await user.getIdToken(); headers['Authorization'] = 'Bearer ' + idToken; }
+            const endpoint = currentMode === 'video' ? '/api/generate-agnes-video' : '/api/generate-image';
+            const response = await fetch(endpoint, { method: 'POST', headers: headers, body: formData });
             const result = await response.json();
             if (!response.ok) {
+                if (response.status === 403 && result.error === 'guest_limit_reached') { showGuestLimitModal(); generateBtn.disabled = false; generateBtn.innerHTML = currentMode === 'video' ? '<i class="fas fa-video"></i>' : '<i class="fas fa-arrow-right"></i>'; isGenerating = false; if (statusEl) statusEl.textContent = ''; return; }
+                if (response.status === 429) {
+                    const waitSec = result.retryAfter || 60;
+                    statusEl.textContent = '⏳ Rate limited. Please wait ' + waitSec + ' seconds and try again.';
+                    showNotification('Generation rate limited. Try again in ' + waitSec + 's.', 'error');
+                    generateBtn.disabled = false;
+                    generateBtn.innerHTML = currentMode === 'video' ? '<i class="fas fa-video"></i>' : '<i class="fas fa-arrow-right"></i>';
+                    isGenerating = false;
+                    return;
+                }
                 throw new Error(result.error || 'Generation failed');
             }
-
-            // Show generated image
-            modalImg.src = result.imageUrl;
-            modal.classList.add('active');
-            // Update remaining credits
-            creditDisplay.textContent = result.remainingCredits;
-
-            // Clear input and image
+            if (currentMode === 'video') {
+                const videoId = result.video_id;
+                if (!videoId) throw new Error('No video_id returned from Agnes.');
+                statusEl.textContent = '⏳ Video generation started (may take several minutes)...';
+                const maxAttempts = 300;
+                let attempt = 0;
+                let videoUrl = null;
+                const completionStatuses = ['completed', 'succeeded', 'done', 'finished', 'success'];
+                while (attempt < maxAttempts) {
+                    attempt++;
+                    try {
+                        const pollRes = await fetch('/api/poll-agnes-video?video_id=' + videoId);
+                        if (pollRes.status === 429) {
+                            const data = await pollRes.json();
+                            const waitSeconds = data.retryAfter || 30;
+                            statusEl.textContent = '⏳ Rate limited. Retrying in ' + waitSeconds + 's... (attempt ' + attempt + ')';
+                            await new Promise(r => setTimeout(r, waitSeconds * 1000));
+                            continue;
+                        }
+                        if (!pollRes.ok) throw new Error('Poll failed: ' + pollRes.status);
+                        const pollData = await pollRes.json();
+                        const status = pollData.status || pollData.state || '';
+                        if (completionStatuses.includes(status.toLowerCase())) { videoUrl = pollData.video_url || pollData.output?.video_url || pollData.url; break; }
+                        else if (status === 'failed' || status === 'error') throw new Error('Video generation failed.');
+                        const progress = Math.min(attempt / maxAttempts * 100, 99);
+                        statusEl.textContent = '⏳ Generating video… ' + Math.round(progress) + '% (attempt ' + attempt + '/' + maxAttempts + ')';
+                        const delay = Math.min(2000 * Math.pow(1.2, attempt), 15000);
+                        await new Promise(r => setTimeout(r, delay));
+                    } catch (pollError) {
+                        console.error('Poll error:', pollError);
+                        if (!pollError.message.includes('failed')) await new Promise(r => setTimeout(r, 5000));
+                        else throw pollError;
+                    }
+                }
+                if (!videoUrl) {
+                    statusEl.textContent = '⏳ Video is taking longer than expected. Please check your dashboard later.';
+                    showNotification('Video generation is still processing. You can check your dashboard for updates.', 'info');
+                    generateBtn.disabled = false;
+                    generateBtn.innerHTML = '<i class="fas fa-video"></i>';
+                    isGenerating = false;
+                    return;
+                }
+                statusEl.textContent = '✅ Video generated!';
+                showVideoModal(videoUrl);
+                showNotification('Video generated successfully!', 'success');
+            } else {
+                modalImg.src = result.imageUrl;
+                modal.classList.add('active');
+                statusEl.textContent = '✅ Image generated!';
+                showNotification('Image generated successfully!', 'success');
+            }
+            if (user) creditDisplay.textContent = result.remainingCredits;
+            else {
+                const today = new Date().toISOString().split('T')[0];
+                let stored = localStorage.getItem('guestUsage');
+                let usage = stored ? JSON.parse(stored) : null;
+                if (!usage || usage.date !== today) usage = { date: today, count: 0 };
+                usage.count += 1;
+                localStorage.setItem('guestUsage', JSON.stringify(usage));
+                const remaining = Math.max(0, 3 - usage.count);
+                creditDisplay.innerHTML = '<i class="fas fa-bolt"></i> ' + remaining + ' free generations left';
+            }
             promptInput.value = '';
             promptInput.style.height = 'auto';
             previewContainer.style.display = 'none';
             previewImg.src = '';
             fileInput.value = '';
             uploadedImage = null;
-
-            showNotification('Image generated successfully!', 'success');
         } catch (error) {
+            console.error('Generation error:', error);
+            statusEl.textContent = '❌ ' + error.message;
             showNotification(error.message, 'error');
         } finally {
             isGenerating = false;
             generateBtn.disabled = false;
-            generateBtn.innerHTML = '<i class="fas fa-arrow-right"></i>';
+            generateBtn.innerHTML = currentMode === 'video' ? '<i class="fas fa-video"></i>' : '<i class="fas fa-arrow-right"></i>';
+            setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 10000);
         }
     });
 
-    // Modal controls
     modalClose.addEventListener('click', () => modal.classList.remove('active'));
-    modal.addEventListener('click', (e) => {
-        if (e.target === modal) modal.classList.remove('active');
-    });
+    modal.addEventListener('click', (e) => { if (e.target === modal) modal.classList.remove('active'); });
     downloadBtn.addEventListener('click', function() {
         const link = document.createElement('a');
         link.href = modalImg.src;
@@ -7473,52 +7660,43 @@ function generateEnhancedPromptHTML(promptData, affiliates) {
         document.body.removeChild(link);
     });
 
-    // Upgrade modal
-    upgradeClose.addEventListener('click', () => upgradeModal.style.display = 'none');
-    upgradeModal.addEventListener('click', (e) => {
-        if (e.target === upgradeModal) upgradeModal.style.display = 'none';
-    });
+    window.showVideoModal = function(videoUrl) {
+        const existing = document.getElementById('videoModal');
+        if (existing) existing.remove();
+        const modalHTML = '<div class="generated-modal active" id="videoModal"><div class="generated-modal-content" style="max-width:90%;"><button class="generated-modal-close" onclick="document.getElementById(\\'videoModal\\').classList.remove(\\'active\\')">&times;</button><video src="' + videoUrl + '" controls autoplay loop style="width:100%; max-height:80vh; border-radius:12px; background:#000;"></video><button class="generated-modal-download" onclick="downloadVideo(\\'' + videoUrl + '\\')">Download Video</button></div></div>';
+        document.body.insertAdjacentHTML('beforeend', modalHTML);
+    };
+    window.downloadVideo = function(url) {
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'generated-video.mp4';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+    };
 
+    upgradeClose.addEventListener('click', () => upgradeModal.style.display = 'none');
+    upgradeModal.addEventListener('click', (e) => { if (e.target === upgradeModal) upgradeModal.style.display = 'none'; });
     upgradePayBtn.addEventListener('click', async function() {
         const user = await getCurrentUser();
-        if (!user) {
-            showNotification('Please login first.', 'error');
-            return;
-        }
+        if (!user) { showNotification('Please login first.', 'error'); return; }
         this.disabled = true;
         this.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Creating order...';
-
         try {
             const idToken = await user.getIdToken();
-            const res = await fetch('/api/top-up-credits', {
-                method: 'POST',
-                headers: { 'Authorization': \`Bearer \${idToken}\` }
-            });
+            const res = await fetch('/api/top-up-credits', { method: 'POST', headers: { 'Authorization': 'Bearer ' + idToken } });
             const data = await res.json();
             if (!data.success) throw new Error('Failed to create order');
-
             if (data.isDemo) {
-                // Demo mode: add credits directly
                 const verifyRes = await fetch('/api/verify-topup', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        orderId: data.orderId,
-                        paymentId: 'demo_pay_' + Date.now(),
-                        signature: 'demo_signature',
-                        userId: user.uid
-                    })
+                    body: JSON.stringify({ orderId: data.orderId, paymentId: 'demo_pay_' + Date.now(), signature: 'demo_signature', userId: user.uid })
                 });
                 const verifyData = await verifyRes.json();
-                if (verifyData.success) {
-                    showNotification('Added 50 credits (demo)!', 'success');
-                    upgradeModal.style.display = 'none';
-                    fetchCredits();
-                } else {
-                    throw new Error('Demo verification failed');
-                }
+                if (verifyData.success) { showNotification('Added 50 credits (demo)!', 'success'); upgradeModal.style.display = 'none'; fetchCredits(); }
+                else throw new Error('Demo verification failed');
             } else {
-                // Real Razorpay checkout
                 if (typeof Razorpay === 'undefined') {
                     await new Promise((resolve, reject) => {
                         const script = document.createElement('script');
@@ -7529,276 +7707,687 @@ function generateEnhancedPromptHTML(promptData, affiliates) {
                     });
                 }
                 const options = {
-                    key: data.keyId,
-                    amount: data.amount,
-                    currency: data.currency,
-                    name: 'Tools Prompt',
-                    description: 'Top-up 50 credits',
-                    order_id: data.orderId,
+                    key: data.keyId, amount: data.amount, currency: data.currency,
+                    name: 'Tools Prompt', description: 'Top-up 50 credits', order_id: data.orderId,
                     handler: async function(response) {
                         try {
                             const verifyRes = await fetch('/api/verify-topup', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                    orderId: response.razorpay_order_id,
-                                    paymentId: response.razorpay_payment_id,
-                                    signature: response.razorpay_signature,
-                                    userId: user.uid
-                                })
+                                body: JSON.stringify({ orderId: response.razorpay_order_id, paymentId: response.razorpay_payment_id, signature: response.razorpay_signature, userId: user.uid })
                             });
                             const verifyData = await verifyRes.json();
-                            if (verifyData.success) {
-                                showNotification('Credits added!', 'success');
-                                upgradeModal.style.display = 'none';
-                                fetchCredits();
-                            } else {
-                                throw new Error('Verification failed');
-                            }
-                        } catch (e) {
-                            showNotification('Top-up failed: ' + e.message, 'error');
-                        }
+                            if (verifyData.success) { showNotification('Credits added!', 'success'); upgradeModal.style.display = 'none'; fetchCredits(); }
+                            else throw new Error('Verification failed');
+                        } catch (e) { showNotification('Top-up failed: ' + e.message, 'error'); }
                     },
-                    modal: {
-                        ondismiss: function() {
-                            showNotification('Payment cancelled', 'info');
-                        }
-                    },
+                    modal: { ondismiss: function() { showNotification('Payment cancelled', 'info'); } },
                     theme: { color: '#4e54c8' },
-                    prefill: {
-                        email: user.email,
-                        name: user.displayName || user.email
-                    }
+                    prefill: { email: user.email, name: user.displayName || user.email }
                 };
                 const rzp = new Razorpay(options);
                 rzp.open();
             }
-        } catch (error) {
-            showNotification('Upgrade error: ' + error.message, 'error');
-        } finally {
-            this.disabled = false;
-            this.innerHTML = '<i class="fas fa-rupee-sign"></i> Pay ₹20 for 50 credits';
-        }
+        } catch (error) { showNotification('Upgrade error: ' + error.message, 'error'); }
+        finally { this.disabled = false; this.innerHTML = '<i class="fas fa-rupee-sign"></i> Pay ₹20 for 50 credits'; }
     });
 
-    // Keyboard shortcut: Ctrl+Enter to generate
-    promptInput.addEventListener('keydown', function(e) {
-        if (e.ctrlKey && e.key === 'Enter') {
-            e.preventDefault();
-            generateBtn.click();
-        }
-    });
-
-    // Expose fetchCredits for after top-up
+    promptInput.addEventListener('keydown', function(e) { if (e.ctrlKey && e.key === 'Enter') { e.preventDefault(); generateBtn.click(); } });
     window.refreshCredits = fetchCredits;
+
+    window.showGuestLimitModal = function() {
+        const existing = document.getElementById('guestLimitModal');
+        if (existing) existing.remove();
+        const overlay = document.createElement('div');
+        overlay.className = 'buy-modal-overlay';
+        overlay.id = 'guestLimitModal';
+        overlay.innerHTML = '<div class="buy-modal" style="max-width: 450px;"><div class="modal-header"><h2><i class="fas fa-exclamation-circle"></i> Free Generations Used</h2><button class="close-modal" onclick="document.getElementById(\\'guestLimitModal\\').remove()">&times;</button></div><div class="buy-modal-content" style="padding: 20px; text-align: center;"><p>You\\u2019ve used all your free guest generations today.</p><p><strong>Login</strong> to receive <strong>5 free credits every day</strong> and continue creating!</p><button class="buy-now-btn" onclick="window.location.href=\\'/login.html?returnUrl=\\'+encodeURIComponent(window.location.href)"><i class="fas fa-sign-in-alt"></i> Login Now</button><p style="margin-top: 15px; font-size: 0.8rem; color: #666;">Or <a href="/" style="color: #4e54c8;">continue browsing</a>.</p></div></div>';
+        document.body.appendChild(overlay);
+        document.body.style.overflow = 'hidden';
+    };
 })();
+`;
+
+  function generateCommentSystemJS(promptData) {
+    return `
+let currentPage = 1;
+let isLoadingComments = false;
+let hasMoreComments = true;
+async function loadComments(page = 1) {
+    if (isLoadingComments) return;
+    isLoadingComments = true;
+    const promptId = '${promptData.id}';
+    const commentsList = document.getElementById('commentsList');
+    const noComments = document.getElementById('noComments');
+    const loadMoreDiv = document.getElementById('loadMoreComments');
+    try {
+        const response = await fetch('/api/prompt/' + promptId + '/comments?page=' + page + '&limit=10');
+        if (!response.ok) throw new Error('Failed to load comments');
+        const data = await response.json();
+        if (page === 1) { commentsList.innerHTML = ''; noComments.style.display = 'none'; }
+        if (data.comments && data.comments.length > 0) {
+            data.comments.forEach(comment => { const commentElement = createCommentElement(comment); commentsList.appendChild(commentElement); });
+            hasMoreComments = data.hasMore;
+            loadMoreDiv.style.display = hasMoreComments ? 'block' : 'none';
+            if (page === 1 && data.totalCount > 0) { const commentCount = document.querySelector('.comment-count'); if (commentCount) commentCount.textContent = data.totalCount; }
+        } else if (page === 1) { noComments.style.display = 'block'; loadMoreDiv.style.display = 'none'; }
+        currentPage = page;
+    } catch (error) {
+        console.error('Error loading comments:', error);
+        if (page === 1) { noComments.innerHTML = '<p>Error loading comments. Please try again.</p>'; noComments.style.display = 'block'; }
+    } finally { isLoadingComments = false; }
+}
+function createCommentElement(comment) {
+    const commentDate = new Date(comment.createdAt);
+    const formattedDate = commentDate.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const avatarLetter = comment.authorName.charAt(0).toUpperCase();
+    const element = document.createElement('div');
+    element.className = 'comment-item';
+    element.id = 'comment-' + comment.id;
+    element.innerHTML = '<div class="comment-header"><div class="comment-author"><div class="comment-avatar">' + avatarLetter + '</div><div class="comment-author-info"><h4>' + comment.authorName + '</h4><div class="comment-date"><i class="far fa-clock"></i> ' + formattedDate + '</div></div></div><div class="comment-actions"><button class="like-comment-btn" onclick="likeComment(\\'' + comment.id + '\\')" data-likes="' + (comment.likes || 0) + '"><i class="far fa-heart"></i><span class="like-count">' + (comment.likes || 0) + '</span></button></div></div><p class="comment-content">' + comment.content + '</p>';
+    return element;
+}
+document.getElementById('commentForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    const promptId = '${promptData.id}';
+    const form = e.target;
+    const submitBtn = form.querySelector('button[type="submit"]');
+    const originalBtnText = submitBtn.innerHTML;
+    const formData = { content: form.content.value.trim(), authorName: form.authorName.value.trim() || 'Anonymous', authorEmail: form.authorEmail.value.trim() || null };
+    if (!formData.content) { alert('Please enter a comment'); return; }
+    submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Posting...';
+    submitBtn.disabled = true;
+    try {
+        const response = await fetch('/api/prompt/' + promptId + '/comments', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) });
+        const result = await response.json();
+        if (result.success) { form.reset(); alert('Comment posted successfully!'); loadComments(1); document.getElementById('commentSection').scrollIntoView({ behavior: 'smooth' }); }
+        else alert(result.error || 'Failed to post comment');
+    } catch (error) { console.error('Error posting comment:', error); alert('Failed to post comment. Please try again.'); }
+    finally { submitBtn.innerHTML = originalBtnText; submitBtn.disabled = false; }
+});
+async function likeComment(commentId) {
+    const promptId = '${promptData.id}';
+    const likeBtn = document.querySelector('#comment-' + commentId + ' .like-comment-btn');
+    if (likeBtn.classList.contains('liked')) return;
+    try {
+        const response = await fetch('/api/comment/' + commentId + '/like', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ promptId }) });
+        if (response.ok) {
+            likeBtn.classList.add('liked');
+            const likeCount = likeBtn.querySelector('.like-count');
+            const currentLikes = parseInt(likeCount.textContent);
+            likeCount.textContent = currentLikes + 1;
+        }
+    } catch (error) { console.error('Error liking comment:', error); }
+}
+document.getElementById('loadMoreBtn').addEventListener('click', function() { if (hasMoreComments && !isLoadingComments) loadComments(currentPage + 1); });
+document.addEventListener('DOMContentLoaded', function() {
+    loadComments(1);
+    const commentTextarea = document.getElementById('commentContent');
+    if (commentTextarea) {
+        const counter = document.createElement('div');
+        counter.style.color = '#666';
+        counter.style.fontSize = '0.85rem';
+        counter.style.textAlign = 'right';
+        counter.style.marginTop = '0.25rem';
+        counter.textContent = '0/1000';
+        commentTextarea.parentNode.appendChild(counter);
+        commentTextarea.addEventListener('input', function() {
+            counter.textContent = this.value.length + '/1000';
+            if (this.value.length > 1000) counter.style.color = '#ff6b6b';
+            else counter.style.color = '#666';
+        });
+    }
+});
+`;
+  }
+
+  // ===== FIXED SOCIAL FEED JS — removed broken wrapper, works correctly =====
+  const socialFeedJS = `
+let feedExpanded = false;
+let replyTo = null;
+let messageCache = [];
+let activityCache = [];
+let eventSource = null;
+let currentUserId = null, currentUserName = null;
+let notificationPermissionGranted = false;
+let notificationRequested = false;
+
+async function requestNotificationPermission() {
+    if (!('Notification' in window)) { console.warn('⚠️ This browser does not support notifications'); return false; }
+    if (Notification.permission === 'granted') { notificationPermissionGranted = true; notificationRequested = true; return true; }
+    if (Notification.permission === 'denied') { console.warn('❌ Notification permission denied'); return false; }
+    try {
+        const permission = await Notification.requestPermission();
+        notificationPermissionGranted = (permission === 'granted');
+        notificationRequested = true;
+        return notificationPermissionGranted;
+    } catch (error) { return false; }
+}
+function showBrowserNotification(title, body, data) {
+    if (!notificationPermissionGranted) return;
+    try {
+        const options = { body: body || '', icon: 'https://www.toolsprompt.com/logo.png', badge: 'https://www.toolsprompt.com/logo.png', data: data || {}, requireInteraction: false };
+        const notification = new Notification(title, options);
+        notification.onclick = function(event) {
+            event.preventDefault();
+            window.focus();
+            if (!feedExpanded) window.toggleFeed();
+            notification.close();
+        };
+        setTimeout(() => notification.close(), 10000);
+    } catch (error) { console.error('Error showing notification:', error); }
+}
+
+// ===== WORKING toggleFeed — no broken wrapper =====
+window.toggleFeed = function() {
+    feedExpanded = !feedExpanded;
+    const feedContainer = document.getElementById('socialFeed');
+    if (!feedContainer) { console.warn('socialFeed container not found'); return; }
+    feedContainer.classList.toggle('expanded', feedExpanded);
+    const icon = document.getElementById('feedToggleIcon');
+    if (icon) icon.className = feedExpanded ? 'fas fa-chevron-right' : 'fas fa-chevron-left';
+    if (feedExpanded) {
+        loadMessages();
+        loadActivity();
+        connectSSE();
+        if (!notificationRequested) requestNotificationPermission();
+    } else {
+        if (eventSource) { eventSource.close(); eventSource = null; }
+    }
+};
+
+document.querySelectorAll('.feed-tab').forEach(tab => {
+    tab.addEventListener('click', function() {
+        document.querySelectorAll('.feed-tab').forEach(t => t.classList.remove('active'));
+        this.classList.add('active');
+        document.querySelectorAll('.feed-tab-content').forEach(c => c.classList.remove('active'));
+        const target = document.getElementById('tab-' + this.dataset.tab);
+        if (target) target.classList.add('active');
+    });
+});
+
+async function loadMessages() {
+    try {
+        const res = await fetch('/api/chat/messages?limit=50');
+        const data = await res.json();
+        messageCache = data.messages || [];
+        renderMessages();
+    } catch(e) { console.error('Load messages error:', e); }
+}
+function renderMessages() {
+    const container = document.getElementById('chatMessages');
+    if (!container) return;
+    container.innerHTML = '';
+    messageCache.forEach(msg => { const el = createMessageElement(msg); container.appendChild(el); });
+    container.scrollTop = container.scrollHeight;
+}
+function createMessageElement(msg) {
+    const div = document.createElement('div');
+    div.className = 'chat-message' + (msg.userId === currentUserId ? ' own' : '');
+    div.dataset.id = msg.id;
+    let parentHtml = '';
+    if (msg.parentId) {
+        const parentMsg = messageCache.find(m => m.id === msg.parentId);
+        if (parentMsg) parentHtml = '<div class="msg-reply-context">↳ Replying to <strong>' + escapeHtml(parentMsg.userName) + '</strong>: ' + escapeHtml(parentMsg.content || parentMsg.sticker || '') + '</div>';
+    }
+    let contentHtml = '';
+    if (msg.sticker) contentHtml = '<div class="msg-sticker" style="font-size: 3rem; line-height: 1.2;">' + msg.sticker + '</div>';
+    else contentHtml = '<div class="msg-content">' + escapeHtml(msg.content) + '</div>';
+    div.innerHTML = '<div class="msg-user">' + escapeHtml(msg.userName) + '</div>' + parentHtml + contentHtml + '<div class="msg-time">' + timeAgo(msg.timestamp) + '</div><div class="msg-reactions">' + Object.keys(msg.reactions || {}).map(emoji => '<span onclick="reactToMessage(\\'' + msg.id + '\\',\\'' + emoji + '\\')">' + emoji + ' ' + msg.reactions[emoji].length + '</span>').join('') + '</div><div class="msg-actions"><button onclick="showReactionPicker(\\'' + msg.id + '\\')"><i class="far fa-smile"></i></button><button onclick="replyToMessage(\\'' + msg.id + '\\',\\'' + escapeHtml(msg.userName) + '\\',\\'' + escapeHtml(msg.content || msg.sticker || '') + '\\')"><i class="fas fa-reply"></i></button></div>';
+    return div;
+}
+window.sendChatMessage = function() {
+    const chatInput = document.getElementById('chatInput');
+    const content = chatInput.value.trim();
+    if (!content && !replyTo) return;
+    const payload = { userId: currentUserId, userName: currentUserName || 'Guest', content: content || '', parentId: replyTo ? replyTo.id : null };
+    fetch('/api/chat/send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+        .then(() => { chatInput.value = ''; cancelReply(); })
+        .catch(e => console.error('Send error:', e));
+};
+window.sendSticker = function(sticker) {
+    if (!sticker) return;
+    const payload = { userId: currentUserId, userName: currentUserName || 'Guest', sticker: sticker, parentId: replyTo ? replyTo.id : null };
+    fetch('/api/chat/send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+        .then(() => { document.getElementById('stickerPicker').classList.remove('open'); cancelReply(); })
+        .catch(e => console.error('Sticker send error:', e));
+};
+window.replyToMessage = function(id, userName, content) {
+    replyTo = { id, userName, content };
+    const indicator = document.getElementById('replyIndicator');
+    indicator.style.display = 'flex';
+    document.getElementById('replyUser').textContent = userName;
+    document.getElementById('replyContent').textContent = (content || 'sticker').substring(0, 40) + ((content || '').length > 40 ? '...' : '');
+    document.getElementById('chatInput').focus();
+};
+window.cancelReply = function() { replyTo = null; document.getElementById('replyIndicator').style.display = 'none'; };
+window.showReactionPicker = function(msgId) {
+    const existing = document.querySelector('.reaction-picker');
+    if (existing) existing.remove();
+    const picker = document.createElement('div');
+    picker.className = 'reaction-picker open';
+    picker.style.position = 'absolute'; picker.style.top = '0'; picker.style.right = '0'; picker.style.zIndex = '20';
+    picker.innerHTML = ['❤️','😂','😮','😢','😡','👍'].map(emoji => '<button onclick="reactToMessage(\\'' + msgId + '\\',\\'' + emoji + '\\'); this.closest(\\'.reaction-picker\\').remove();">' + emoji + '</button>').join('');
+    const msgEl = document.querySelector('.chat-message[data-id="' + msgId + '"]');
+    if (msgEl) {
+        msgEl.style.position = 'relative';
+        msgEl.appendChild(picker);
+        setTimeout(() => {
+            document.addEventListener('click', function closePicker(e) {
+                if (!picker.contains(e.target) && e.target.closest('.chat-message') !== msgEl) { picker.remove(); document.removeEventListener('click', closePicker); }
+            });
+        }, 100);
+    }
+};
+window.reactToMessage = function(msgId, emoji) {
+    fetch('/api/chat/react', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messageId: msgId, userId: currentUserId, emoji }) })
+        .then(() => { if (emoji === '❤️') triggerFloatingHearts(); })
+        .catch(e => console.error('React error:', e));
+};
+window.triggerFloatingHearts = function() {
+    for (let i=0; i<10; i++) {
+        setTimeout(() => {
+            const heart = document.createElement('div');
+            heart.className = 'floating-hearts';
+            heart.textContent = '❤️';
+            heart.style.left = (Math.random() * 60 + 20) + '%';
+            heart.style.bottom = (Math.random() * 30 + 10) + 'vh';
+            heart.style.fontSize = (Math.random() * 1.5 + 1.5) + 'rem';
+            document.body.appendChild(heart);
+            setTimeout(() => heart.remove(), 1500);
+        }, i * 100);
+    }
+};
+window.openStickerPicker = function() { const picker = document.getElementById('stickerPicker'); if (picker) picker.classList.toggle('open'); };
+window.submitSuggestion = function() {
+    const text = document.getElementById('suggestInput').value.trim();
+    if (!text) return;
+    fetch('/api/chat/send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: currentUserId, userName: currentUserName || 'Guest', content: '💡 Suggestion: ' + text, parentId: null }) })
+        .then(() => { document.getElementById('suggestInput').value = ''; document.querySelector('[data-tab="chat"]').click(); })
+        .catch(e => console.error('Suggestion error:', e));
+};
+function connectSSE() {
+    if (eventSource) eventSource.close();
+    eventSource = new EventSource('/api/chat/stream');
+    eventSource.onmessage = function(e) {
+        const data = JSON.parse(e.data);
+        if (data.type === 'init') { messageCache = data.messages || []; renderMessages(); }
+        else if (data.type === 'message') {
+            messageCache.push(data.message);
+            renderMessages();
+            const chatTab = document.getElementById('tab-chat');
+            if (chatTab && chatTab.classList.contains('active')) document.getElementById('chatMessages').scrollTop = document.getElementById('chatMessages').scrollHeight;
+            if (document.hidden || !feedExpanded) {
+                if (data.message.userId !== currentUserId) showBrowserNotification('💬 ' + data.message.userName, data.message.content || data.message.sticker, { type: 'message' });
+            }
+        } else if (data.type === 'reaction') {
+            const msg = messageCache.find(m => m.id === data.messageId);
+            if (msg) msg.reactions = data.reactions;
+            renderMessages();
+        } else if (data.type === 'activity') { activityCache.unshift(data.activity); renderActivity(); }
+    };
+    eventSource.onerror = function() { console.log('SSE error, reconnecting...'); setTimeout(() => connectSSE(), 3000); };
+}
+async function loadActivity() {
+    try {
+        const res = await fetch('/api/activity?limit=20');
+        const data = await res.json();
+        activityCache = data.items || [];
+        renderActivity();
+    } catch(e) { console.error('Load activity error:', e); }
+}
+function renderActivity() {
+    const container = document.getElementById('activityFeed');
+    if (!container) return;
+    container.innerHTML = activityCache.map(item => '<div class="activity-item"><div class="act-icon">' + (item.type === 'upload' ? '📸' : '📢') + '</div><div class="act-content"><h4>' + (item.type === 'upload' ? 'New Prompt Uploaded' : 'Platform Update') + '</h4><p>' + (item.title || 'Untitled') + ' by ' + (item.userName || 'Anonymous') + '</p><div class="act-time">' + timeAgo(item.timestamp) + '</div></div></div>').join('');
+}
+function escapeHtml(text) { const div = document.createElement('div'); div.textContent = text; return div.innerHTML; }
+function timeAgo(dateStr) {
+    const diff = Date.now() - new Date(dateStr).getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return mins + 'm';
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return hrs + 'h';
+    return Math.floor(hrs/24) + 'd';
+}
+if (typeof firebase !== 'undefined' && firebase.auth) {
+    firebase.auth().onAuthStateChanged(user => {
+        if (user) { currentUserId = user.uid; currentUserName = user.displayName || user.email || 'User'; }
+        else { currentUserId = 'guest-' + Date.now(); currentUserName = 'Guest'; }
+    });
+} else { currentUserId = 'guest-' + Date.now(); currentUserName = 'Guest'; }
+`;
+
+  const mediaDisplay = isVideo ? `
+    <div class="shorts-video-container">
+      <video src="${promptData.videoUrl || promptData.mediaUrl}" poster="${promptData.imageUrl}" class="shorts-image" controls loop playsinline preload="metadata" onerror="this.style.display='none'; document.getElementById('videoFallback').style.display='flex';"></video>
+      <div id="videoFallback" style="display:none; position:absolute; top:0; left:0; right:0; bottom:0; background:#000; color:white; align-items:center; justify-content:center; flex-direction:column;">
+        <i class="fas fa-exclamation-triangle" style="font-size:2rem; margin-bottom:1rem;"></i>
+        <p>Video failed to load. Try refreshing.</p>
+      </div>
+      ${promptData.videoDuration ? `<span class="video-duration">${promptData.videoDuration}s</span>` : ''}
+    </div>
+  ` : `
+    <img src="${promptData.imageUrl}" alt="${promptData.title} - AI Generated Image" class="prompt-image" onerror="this.src='https://via.placeholder.com/800x400/4e54c8/ffffff?text=AI+Generated+Image'" id="promptImage">
   `;
 
-  // ==================== STICKY INSTAGRAM BADGE ====================
-  // CSS for the sticky Instagram icon (with periodic shake animation)
- // ==================== STICKY SOCIAL BADGES (Instagram + YouTube) ====================
-const socialBadgesCSS = `
-/* Sticky Social Badges Container - Left Side */
-.social-badges-container {
-    position: fixed;
-    left: 20px;
-    top: 50%;
-    transform: translateY(-50%);
-    z-index: 9998;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 8px;
-}
+  const platformBadge = `<div class="ai-model-badge"><i class="fas fa-${isVideo ? 'video' : 'camera'}"></i> ${platformInfo.name || (isVideo ? 'AI Video' : 'AI Image')}</div>`;
+  const priceBadge = promptData.isPaid ? `<div class="price-badge"><i class="fas fa-rupee-sign"></i> ${promptData.price}</div>` : `<div class="price-badge free"><i class="fas fa-gift"></i> Free</div>`;
 
-/* Toggle button */
-.social-badges-toggle {
-    background: rgba(255, 255, 255, 0.95);
-    border: none;
-    border-radius: 50%;
-    width: 40px;
-    height: 40px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
-    transition: all 0.3s ease;
-    color: #4e54c8;
-    font-size: 1.2rem;
-    margin-bottom: 6px;
-    backdrop-filter: blur(5px);
-    border: 2px solid rgba(255, 255, 255, 0.3);
-}
-.social-badges-toggle:hover {
-    transform: scale(1.1);
-    box-shadow: 0 6px 20px rgba(78, 84, 200, 0.4);
-}
+  const aiStepsHTML = (promptData.customHowToSteps && promptData.customHowToSteps.length > 0)
+    ? promptData.customHowToSteps.map((step, idx) => `
+        <div class="instruction-step">
+          <div class="step-number">${idx + 1}</div>
+          <div class="step-content">${step}</div>
+        </div>
+      `).join('')
+    : (isVideo ? `
+        <div class="instruction-step"><div class="step-number">1</div><div class="step-content"><strong>Access the Platform:</strong> ${promptData.aiStepByStepGuide.access}</div></div>
+        <div class="instruction-step"><div class="step-number">2</div><div class="step-content"><strong>Prepare Your Video Concept:</strong> ${promptData.aiStepByStepGuide.preparation}</div></div>
+        <div class="instruction-step"><div class="step-number">3</div><div class="step-content"><strong>Use Your Prompt:</strong> ${promptData.aiStepByStepGuide.prompt}</div></div>
+        <div class="instruction-step"><div class="step-number">4</div><div class="step-content"><strong>Adjust Parameters:</strong> ${promptData.aiStepByStepGuide.customization}</div></div>
+        <div class="instruction-step"><div class="step-number">5</div><div class="step-content"><strong>Generate and Review:</strong> ${promptData.aiStepByStepGuide.generation}</div></div>
+        <div class="instruction-step"><div class="step-number">6</div><div class="step-content"><strong>Export and Edit Further:</strong> ${promptData.aiStepByStepGuide.finalization}</div></div>
+      ` : `
+        <div class="instruction-step"><div class="step-number">1</div><div class="step-content"><strong>Access the Platform:</strong> ${promptData.aiStepByStepGuide.access}</div></div>
+        <div class="instruction-step"><div class="step-number">2</div><div class="step-content"><strong>Prepare Your Input:</strong> ${promptData.aiStepByStepGuide.preparation}</div></div>
+        <div class="instruction-step"><div class="step-number">3</div><div class="step-content"><strong>Use Your Prompt:</strong> ${promptData.aiStepByStepGuide.prompt}</div></div>
+        <div class="instruction-step"><div class="step-number">4</div><div class="step-content"><strong>Customize Details:</strong> ${promptData.aiStepByStepGuide.customization}</div></div>
+        <div class="instruction-step"><div class="step-number">5</div><div class="step-content"><strong>Generate and Refine:</strong> ${promptData.aiStepByStepGuide.generation}</div></div>
+        <div class="instruction-step"><div class="step-number">6</div><div class="step-content"><strong>Finalize and Export:</strong> ${promptData.aiStepByStepGuide.finalization}</div></div>
+      `);
 
-/* Each badge */
-.social-badge {
-    background: rgba(255, 255, 255, 0.95);
-    border-radius: 50px;
-    padding: 10px 12px;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    text-decoration: none;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
-    transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
-    cursor: pointer;
-    min-width: 44px;
-    min-height: 44px;
-    font-family: 'Segoe UI', sans-serif;
-    border: 2px solid rgba(255, 255, 255, 0.2);
-    backdrop-filter: blur(5px);
-    animation: social-shake 5s ease-in-out infinite;
-    transform-origin: center;
-    color: white;
-    opacity: 1;
-    transform: scale(1) translateY(0);
-    pointer-events: auto;
-}
+  const aiExpertTipsHTML = (promptData.aiExpertTips || []).map(tip => `<li>${tip}</li>`).join('');
 
-/* Collapsed state: hide badges with a page‑turn effect */
-.social-badges-container.collapsed .social-badge {
-    opacity: 0;
-    transform: scale(0.5) rotateY(90deg) translateY(-40px);
-    pointer-events: none;
-    animation: none;
-}
+  let toolsHTML;
+  if (promptData.customTopToolsRaw) {
+    const lines = promptData.customTopToolsRaw.split('\n').map(l => l.trim()).filter(Boolean);
+    toolsHTML = lines.map(line => {
+      const parts = line.split('|').map(p => p.trim());
+      const [name, description, bestFor, price] = parts;
+      return `
+        <div class="tool-card-enhanced">
+          <h4>${name || 'AI Tool'}</h4>
+          <p>${description || ''}</p>
+          <div class="tool-tags">
+            ${bestFor ? `<span class="tool-tag">${bestFor}</span>` : ''}
+            ${price ? `<span class="tool-tag">${price}</span>` : ''}
+          </div>
+        </div>
+      `;
+    }).join('');
+  } else {
+    toolsHTML = (promptData.bestAITools || []).map(tool => `
+      <div class="tool-card-enhanced ${tool.isPrimary ? 'primary-tool' : ''}">
+        <h4>${tool.name}<div class="tool-rating">${Array(tool.rating || 4).fill('<i class="fas fa-star"></i>').join('')}${Array(5 - (tool.rating || 4)).fill('<i class="far fa-star"></i>').join('')}</div></h4>
+        <p>${tool.description}</p>
+        <div class="tool-tags">${(tool.strengths || tool.category || []).map(tag => `<span class="tool-tag">${tag}</span>`).join('')}</div>
+      </div>
+    `).join('');
+  }
 
-.social-badges-container.collapsed .social-badges-toggle i {
-    transform: rotate(180deg);
-}
+  const tipsHTML = (promptData.usageTips || []).map(tip => `<li>${tip}</li>`).join('');
+  const seoTipsHTML = (promptData.seoTips || []).map(tip => `<li>${tip}</li>`).join('');
 
-.social-badge:hover {
-    transform: scale(1.1);
-    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
-    border-color: rgba(255, 255, 255, 0.5);
-    animation: none;
-}
+  const affiliateTop = affiliates[0] ? generateAffiliateHTML(affiliates[0]) : '';
+  const affiliateMiddle = affiliates[1] ? generateAffiliateHTML(affiliates[1]) : '';
+  const affiliateBottom = affiliates[2] ? generateAffiliateHTML(affiliates[2]) : '';
 
-.social-badge i {
-    font-size: 1.8rem;
-    margin-bottom: 4px;
-    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  // ==================== EDIT MODAL CSS ====================
+  const editModalCSS = `
+.edit-prompt-btn {
+  position: absolute; top: 15px; right: 15px;
+  background: linear-gradient(135deg, #4e54c8, #8f94fb);
+  color: #fff; border: none; padding: 10px 18px;
+  border-radius: 30px; font-weight: 600; font-size: 0.9rem;
+  cursor: pointer; box-shadow: 0 4px 15px rgba(78,84,200,0.4);
+  display: none; align-items: center; gap: 8px;
+  z-index: 50; transition: all 0.25s ease;
 }
-
-.social-badge .followers-text {
-    font-size: 0.65rem;
-    font-weight: 700;
-    letter-spacing: 0.5px;
-    text-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
-    white-space: nowrap;
+.edit-prompt-btn:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(78,84,200,0.55); }
+.article-header { position: relative; }
+.edit-modal-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.8);
+  display: none; align-items: center; justify-content: center;
+  z-index: 100000; padding: 20px;
+  backdrop-filter: blur(6px);
+  animation: fadeIn 0.25s ease;
 }
-
-.instagram-badge {
-    background: linear-gradient(135deg, #405de6, #5851db, #833ab4, #c13584, #e1306c, #fd1d1d);
-    background-size: 200% 200%;
-    animation: social-shake 5s ease-in-out infinite, gradient-shift 3s ease infinite;
+.edit-modal-overlay.active { display: flex; }
+.edit-modal {
+  background: #fff; border-radius: 18px;
+  width: 100%; max-width: 820px; max-height: 92vh;
+  display: flex; flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 25px 80px rgba(0,0,0,0.5);
+  animation: slideUp 0.3s ease;
 }
-
-.youtube-badge {
-    background: linear-gradient(135deg, #ff0000, #cc0000);
-    background-size: 200% 200%;
-    animation: social-shake 5s ease-in-out infinite 0.5s, gradient-shift 3s ease infinite 0.5s;
+.edit-modal-header {
+  padding: 18px 24px;
+  background: linear-gradient(135deg, #4e54c8, #8f94fb);
+  color: #fff;
+  display: flex; justify-content: space-between; align-items: center;
 }
-
-.whatsapp-badge {
-    background: linear-gradient(135deg, #25d366, #128c7e);
-    background-size: 200% 200%;
-    animation: social-shake 5s ease-in-out infinite 1s, gradient-shift 3s ease infinite 1s;
+.edit-modal-header h2 { margin: 0; font-size: 1.25rem; display: flex; align-items: center; gap: 10px; }
+.edit-modal-close {
+  background: rgba(255,255,255,0.2); border: none; color: #fff;
+  width: 34px; height: 34px; border-radius: 50%;
+  cursor: pointer; font-size: 1.1rem;
+  display: flex; align-items: center; justify-content: center;
 }
-
-@keyframes social-shake {
-    0%, 88% { transform: scale(1); }
-    90% { transform: scale(1.15); }
-    92% { transform: scale(0.85); }
-    94% { transform: scale(1.05); }
-    96% { transform: scale(0.95); }
-    98% { transform: scale(1.02); }
-    100% { transform: scale(1); }
+.edit-modal-close:hover { background: rgba(255,255,255,0.35); }
+.edit-modal-body { padding: 20px 24px; overflow-y: auto; flex: 1; }
+.edit-modal-footer {
+  padding: 16px 24px; border-top: 1px solid #e9ecef;
+  display: flex; gap: 12px; justify-content: flex-end; background: #f8f9fa;
 }
-
-@keyframes gradient-shift {
-    0% { background-position: 0% 50%; }
-    50% { background-position: 100% 50%; }
-    100% { background-position: 0% 50%; }
+.edit-section {
+  margin-bottom: 20px; padding: 16px;
+  background: #f8f9fa; border-radius: 12px;
+  border-left: 4px solid #4e54c8;
 }
-
-@media (max-width: 768px) {
-    .social-badges-container {
-        left: 10px;
-        gap: 6px;
-    }
-    .social-badges-toggle {
-        width: 34px;
-        height: 34px;
-        font-size: 1rem;
-    }
-    .social-badge {
-        padding: 8px 10px;
-        min-width: 38px;
-        min-height: 38px;
-    }
-    .social-badge i {
-        font-size: 1.4rem;
-    }
-    .social-badge .followers-text {
-        font-size: 0.5rem;
-    }
+.edit-section h3 {
+  margin: 0 0 10px 0; color: #2d334a;
+  font-size: 1rem; display: flex; align-items: center; gap: 8px;
 }
-
-@media (max-width: 480px) {
-    .social-badges-container {
-        left: 6px;
-        gap: 4px;
-    }
-    .social-badges-toggle {
-        width: 28px;
-        height: 28px;
-        font-size: 0.8rem;
-    }
-    .social-badge {
-        padding: 6px 8px;
-        min-width: 32px;
-        min-height: 32px;
-    }
-    .social-badge i {
-        font-size: 1.2rem;
-    }
-    .social-badge .followers-text {
-        font-size: 0.45rem;
-    }
+.edit-section .hint {
+  font-size: 0.8rem; color: #888; margin-bottom: 8px; display: block;
+}
+.edit-section input[type="text"],
+.edit-section input[type="file"],
+.edit-section textarea {
+  width: 100%; padding: 10px 12px;
+  border: 1px solid #ddd; border-radius: 8px;
+  font-size: 0.95rem; font-family: inherit;
+  transition: border-color 0.2s ease;
+}
+.edit-section textarea { min-height: 90px; resize: vertical; line-height: 1.5; }
+.edit-section textarea:focus,
+.edit-section input[type="text"]:focus {
+  outline: none; border-color: #4e54c8;
+  box-shadow: 0 0 0 3px rgba(78,84,200,0.1);
+}
+.edit-image-preview {
+  margin-top: 10px; max-width: 220px; max-height: 160px;
+  border-radius: 10px; border: 2px solid #e9ecef; object-fit: cover;
+}
+.edit-modal-footer button {
+  padding: 11px 24px; border-radius: 30px; border: none;
+  font-weight: 600; cursor: pointer; font-size: 0.95rem;
+  display: inline-flex; align-items: center; gap: 8px;
+  transition: all 0.2s ease;
+}
+.btn-save-edit { background: linear-gradient(135deg, #10b981, #4cd964); color: #fff; }
+.btn-save-edit:hover { transform: translateY(-2px); box-shadow: 0 6px 18px rgba(16,185,129,0.4); }
+.btn-save-edit:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+.btn-cancel-edit { background: #e9ecef; color: #555; }
+.btn-cancel-edit:hover { background: #dde1e6; }
+@media (max-width: 600px) {
+  .edit-modal { max-height: 95vh; border-radius: 14px; }
+  .edit-modal-header, .edit-modal-body, .edit-modal-footer { padding-left: 16px; padding-right: 16px; }
+  .edit-prompt-btn { font-size: 0.8rem; padding: 8px 14px; }
 }
 `;
-const socialBadgesHTML = `
-<!-- Sticky Social Badges with Toggle -->
-<div class="social-badges-container" id="socialBadgesContainer">
-    <button class="social-badges-toggle" id="socialToggleBtn" aria-label="Toggle social badges">
-        <i class="fas fa-chevron-up"></i>
-    </button>
-    <a href="https://instagram.com/toolsprompt" target="_blank" class="social-badge instagram-badge" rel="noopener noreferrer">
-        <i class="fab fa-instagram"></i>
-        <span class="followers-text">10K Followers</span>
-    </a>
-    <a href="https://youtube.com/@toolsprompt" target="_blank" class="social-badge youtube-badge" rel="noopener noreferrer">
-        <i class="fab fa-youtube"></i>
-        <span class="followers-text">10K Subscribers</span>
-    </a>
-    <a href="https://wa.me/yourwhatsappnumber" target="_blank" class="social-badge whatsapp-badge" rel="noopener noreferrer">
-        <i class="fab fa-whatsapp"></i>
-        <span class="followers-text">10K Members</span>
-    </a>
+
+  // ==================== EDIT MODAL HTML ====================
+  const editModalHTML = `
+<div class="edit-modal-overlay" id="editPromptModal">
+  <div class="edit-modal">
+    <div class="edit-modal-header">
+      <h2><i class="fas fa-edit"></i> Edit Prompt Page</h2>
+      <button class="edit-modal-close" id="editModalCloseBtn">&times;</button>
+    </div>
+    <div class="edit-modal-body">
+      <div class="edit-section">
+        <h3><i class="fas fa-heading"></i> Title</h3>
+        <input type="text" id="editTitle" value="${(promptData.title || '').replace(/"/g, '&quot;')}">
+      </div>
+
+      <div class="edit-section">
+        <h3><i class="fas fa-image"></i> Preview Image</h3>
+        <span class="hint">Upload a new image to replace the current one (JPEG / PNG / WebP, max 5MB). Leave empty to keep current.</span>
+        <input type="file" id="editImage" accept="image/*">
+        <img id="editImagePreview" class="edit-image-preview" src="${promptData.imageUrl}" alt="preview">
+      </div>
+
+      <div class="edit-section">
+        <h3><i class="fas fa-info-circle"></i> About This AI Prompt</h3>
+        <span class="hint">Description shown in the "About This Prompt" section.</span>
+        <textarea id="editAbout" placeholder="Describe what this prompt does...">${(promptData.customContent?.aboutDescription || '').replace(/</g, '&lt;')}</textarea>
+      </div>
+
+      <div class="edit-section">
+        <h3><i class="fas fa-chart-bar"></i> AI Platform Comparison (HTML)</h3>
+        <span class="hint">Advanced users: paste custom HTML for the platform comparison table. Leave empty to use the auto-generated version.</span>
+        <textarea id="editPlatformComparison" placeholder="<div>Custom HTML…</div>">${(promptData.customContent?.platformComparison || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</textarea>
+      </div>
+
+      <div class="edit-section">
+        <h3><i class="fas fa-robot"></i> Top AI Tools</h3>
+        <span class="hint">One tool per line: Name | Description | Best For | Price</span>
+        <textarea id="editTopTools" placeholder="Midjourney | Artistic images | Digital art | $10/mo">${(promptData.customContent?.topTools || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</textarea>
+      </div>
+
+      <div class="edit-section">
+        <h3><i class="fas fa-cogs"></i> Model-Specific Optimization Tips (HTML)</h3>
+        <span class="hint">Custom HTML for the model-specific tips section. Leave empty to use the auto-generated version.</span>
+        <textarea id="editModelTips" placeholder="<div>Custom HTML…</div>">${(promptData.customContent?.modelTips || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</textarea>
+      </div>
+
+      <div class="edit-section">
+        <h3><i class="fas fa-list-ol"></i> How To Use This Prompt</h3>
+        <span class="hint">One step per line. Line breaks will be converted into numbered steps.</span>
+        <textarea id="editHowTo" placeholder="Copy the prompt text&#10;Paste into Midjourney&#10;Add --ar 16:9 for widescreen">${(promptData.customContent?.howToSteps || '').replace(/</g, '&lt;')}</textarea>
+      </div>
+
+      <div class="edit-section">
+        <h3><i class="fas fa-graduation-cap"></i> Expert Tips for Best Results</h3>
+        <span class="hint">One tip per line.</span>
+        <textarea id="editExpertTips" placeholder="Use weighted prompts&#10;Try multiple variations">${(promptData.customContent?.expertTips || '').replace(/</g, '&lt;')}</textarea>
+      </div>
+
+      <div class="edit-section">
+        <h3><i class="fas fa-lightbulb"></i> Usage Tips</h3>
+        <span class="hint">One tip per line.</span>
+        <textarea id="editUsageTips" placeholder="Keep prompts detailed&#10;Adjust style parameters">${(promptData.customContent?.usageTips || '').replace(/</g, '&lt;')}</textarea>
+      </div>
+
+      <div class="edit-section">
+        <h3><i class="fas fa-search"></i> Optimization Tips</h3>
+        <span class="hint">One tip per line.</span>
+        <textarea id="editOptimizationTips" placeholder="Use specific language&#10;Include relevant keywords">${(promptData.customContent?.optimizationTips || '').replace(/</g, '&lt;')}</textarea>
+      </div>
+    </div>
+    <div class="edit-modal-footer">
+      <button class="btn-cancel-edit" id="editCancelBtn">Cancel</button>
+      <button class="btn-save-edit" id="editSaveBtn">
+        <i class="fas fa-save"></i> Save Changes
+      </button>
+    </div>
+  </div>
 </div>
 `;
 
+  const editModalJS = `
+(function() {
+  const modal = document.getElementById('editPromptModal');
+  const openBtn = document.getElementById('editPromptBtn');
+  const closeBtn = document.getElementById('editModalCloseBtn');
+  const cancelBtn = document.getElementById('editCancelBtn');
+  const saveBtn = document.getElementById('editSaveBtn');
+  const imageInput = document.getElementById('editImage');
+  const imagePreview = document.getElementById('editImagePreview');
 
+  if (!modal || !openBtn) return;
 
+  function openModal() { modal.classList.add('active'); document.body.style.overflow = 'hidden'; }
+  function closeModal() { modal.classList.remove('active'); document.body.style.overflow = ''; }
 
+  openBtn.addEventListener('click', openModal);
+  closeBtn.addEventListener('click', closeModal);
+  cancelBtn.addEventListener('click', closeModal);
+  modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && modal.classList.contains('active')) closeModal(); });
 
+  if (imageInput) {
+    imageInput.addEventListener('change', function() {
+      const f = this.files[0];
+      if (f) {
+        const r = new FileReader();
+        r.onload = (e) => { imagePreview.src = e.target.result; };
+        r.readAsDataURL(f);
+      }
+    });
+  }
+
+  saveBtn.addEventListener('click', async function() {
+    const user = await getCurrentUser();
+    if (!user) { showNotification('Please login to edit this prompt', 'error'); return; }
+
+    saveBtn.disabled = true;
+    const originalHtml = saveBtn.innerHTML;
+    saveBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving...';
+
+    try {
+      const idToken = await user.getIdToken();
+      const fd = new FormData();
+      fd.append('title', document.getElementById('editTitle').value);
+      fd.append('aboutDescription', document.getElementById('editAbout').value);
+      fd.append('platformComparison', document.getElementById('editPlatformComparison').value);
+      fd.append('topTools', document.getElementById('editTopTools').value);
+      fd.append('modelTips', document.getElementById('editModelTips').value);
+      fd.append('howToSteps', document.getElementById('editHowTo').value);
+      fd.append('expertTips', document.getElementById('editExpertTips').value);
+      fd.append('usageTips', document.getElementById('editUsageTips').value);
+      fd.append('optimizationTips', document.getElementById('editOptimizationTips').value);
+      if (imageInput.files[0]) fd.append('image', imageInput.files[0]);
+
+      const res = await fetch('/api/prompt/${promptData.id}/update-content', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + idToken },
+        body: fd
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || 'Save failed');
+
+      showNotification('✅ Prompt updated! Reloading...', 'success');
+      setTimeout(() => window.location.reload(), 900);
+
+    } catch (err) {
+      console.error('Save error:', err);
+      showNotification('Failed to save: ' + err.message, 'error');
+    } finally {
+      saveBtn.disabled = false;
+      saveBtn.innerHTML = originalHtml;
+    }
+  });
+})();
+`;
+
+  // ==================== FINAL HTML TEMPLATE ====================
   return `<!DOCTYPE html>
 <html lang="en" itemscope itemtype="https://schema.org/Article">
 <head>
@@ -7809,7 +8398,6 @@ const socialBadgesHTML = `
     <meta name="description" content="${promptData.metaDescription}">
     <meta name="keywords" content="${(promptData.keywords || []).join(', ')}">
     <meta name="robots" content="index, follow, max-image-preview:large">
-    
     <meta property="og:title" content="${promptData.seoTitle}">
     <meta property="og:description" content="${promptData.metaDescription}">
     <meta property="og:image" content="${promptData.imageUrl}">
@@ -7817,1193 +8405,196 @@ const socialBadgesHTML = `
     <meta property="og:type" content="${isVideo ? 'video.other' : 'article'}">
     ${isVideo ? `<meta property="og:video" content="${promptData.videoUrl || promptData.mediaUrl}">` : ''}
     <meta property="og:site_name" content="tools prompt">
-    
     <meta name="twitter:card" content="${isVideo ? 'player' : 'summary_large_image'}">
     <meta name="twitter:title" content="${promptData.seoTitle}">
     <meta name="twitter:description" content="${promptData.metaDescription}">
     <meta name="twitter:image" content="${promptData.imageUrl}">
     ${isVideo ? `<meta name="twitter:player" content="${promptData.videoUrl || promptData.mediaUrl}">` : ''}
-    
     <link rel="canonical" href="${promptUrl}" />
-    
     <script type="application/ld+json">
     {
       "@context": "https://schema.org",
       "@type": "${isVideo ? 'VideoObject' : 'HowTo'}",
       "name": "How to Use: ${promptData.title.replace(/"/g, '\\"')}",
       "description": "${promptData.metaDescription.replace(/"/g, '\\"')}",
-      ${isVideo ? `
-      "thumbnailUrl": "${promptData.imageUrl}",
-      "contentUrl": "${promptData.videoUrl || promptData.mediaUrl}",
-      "uploadDate": "${promptData.createdAt}",
-      "duration": "PT${promptData.videoDuration || 10}S",
-      ` : `
-      "image": "${promptData.imageUrl}",
-      "totalTime": "PT5M",
-      "estimatedCost": {
-        "@type": "MonetaryAmount",
-        "currency": "USD",
-        "value": "0"
-      },
-      `}
-      "step": [
-        ${(promptData.stepByStepInstructions || []).map((step, index) => `{
-          "@type": "HowToStep",
-          "position": ${index + 1},
-          "name": "Step ${index + 1}",
-          "text": "${step.replace(/"/g, '\\"')}"
-        }`).join(',')}
-      ]
+      ${isVideo ? `"thumbnailUrl": "${promptData.imageUrl}", "contentUrl": "${promptData.videoUrl || promptData.mediaUrl}", "uploadDate": "${promptData.createdAt}", "duration": "PT${promptData.videoDuration || 10}S",` : `"image": "${promptData.imageUrl}", "totalTime": "PT5M", "estimatedCost": { "@type": "MonetaryAmount", "currency": "USD", "value": "0" },`}
+      "step": [${(promptData.stepByStepInstructions || []).map((step, index) => `{ "@type": "HowToStep", "position": ${index + 1}, "name": "Step ${index + 1}", "text": "${step.replace(/"/g, '\\"')}" }`).join(',')}]
     }
     </script>
-    
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-auth-compat.js"></script>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+       * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
         body { background: #f5f7fa; line-height: 1.6; color: #2d334a; }
         
-        ${miniBrowserCSS}
         ${platformComparisonCSS}
         ${commentSystemCSS}
-        ${downloadAppCSS}
         ${aiGeneratorCSS}
         ${socialBadgesCSS}
-        
-        /* Ad Container Styles */
-        .ad-container {
-            margin: 20px 0;
-            text-align: center;
-            background: #f8f9fa;
-            padding: 15px;
-            border-radius: 12px;
-            border: 1px solid #e9ecef;
-        }
-        
-        .ad-label {
-            font-size: 0.75rem;
-            color: #6c757d;
-            margin-bottom: 8px;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
-        
-        .ad-banner-desktop {
-            display: block;
-        }
-        
-        .ad-banner-mobile {
-            display: none;
-        }
-        
-        .shorts-video-container {
-            width: 100%;
-            height: 500px;
-            background: #000;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            position: relative;
-        }
-        
-        .shorts-video-container video {
-            width: 100%;
-            height: 100%;
-            object-fit: contain;
-        }
-        
-        .video-duration {
-            position: absolute;
-            bottom: 10px;
-            right: 10px;
-            background: rgba(0,0,0,0.7);
-            color: white;
-            padding: 4px 8px;
-            border-radius: 4px;
-            font-size: 12px;
-            z-index: 10;
-        }
-        
-        .ai-model-badge {
-            background: #4e54c8;
-            color: white;
-            padding: 4px 10px;
-            border-radius: 20px;
-            font-size: 0.75rem;
-            font-weight: 600;
-            display: inline-flex;
-            align-items: center;
-            gap: 5px;
-            margin-left: 10px;
-        }
-        
-        .price-badge {
-            position: absolute;
-            top: 10px;
-            left: 10px;
-            background: linear-gradient(135deg, #ff6b6b 0%, #ff8787 100%);
-            color: white;
-            padding: 4px 12px;
-            border-radius: 20px;
-            font-size: 0.8rem;
-            font-weight: bold;
-            z-index: 15;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-        }
-        
-        .price-badge.free {
-            background: linear-gradient(135deg, #20bf6b 0%, #4cd964 100%);
-        }
-        
-        /* Buy Modal Styles */
-        .buy-modal-overlay {
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: rgba(0,0,0,0.7);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            z-index: 10002;
-            animation: fadeIn 0.3s ease;
-        }
-        
-        .buy-modal {
-            background: white;
-            border-radius: 15px;
-            width: 90%;
-            max-width: 800px;
-            max-height: 90vh;
-            overflow-y: auto;
-            animation: slideUp 0.3s ease;
-        }
-        
-        .buy-modal-content {
-            padding: 20px;
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 30px;
-        }
-        
-        .prompt-preview {
-            text-align: center;
-        }
-        
-        .buy-prompt-image {
-            width: 100%;
-            max-height: 200px;
-            object-fit: cover;
-            border-radius: 8px;
-            margin-bottom: 15px;
-        }
-        
-        .prompt-price-large {
-            font-size: 1.5rem;
-            font-weight: bold;
-            color: #ff6b6b;
-            margin: 10px 0;
-        }
-        
-        .prompt-creator {
-            color: #666;
-            font-size: 0.9rem;
-        }
-        
-        .payment-form {
-            padding: 0 15px;
-        }
-        
-        .payment-form h3 {
-            margin-bottom: 15px;
-            color: #2d334a;
-            font-size: 1.1rem;
-        }
-        
-        .payment-form .form-group {
-            margin-bottom: 15px;
-        }
-        
-        .payment-form .form-group label {
-            display: block;
-            margin-bottom: 5px;
-            font-weight: 500;
-            color: #2d334a;
-            font-size: 0.9rem;
-        }
-        
-        .payment-form .form-group input,
-        .payment-form .form-group select {
-            width: 100%;
-            padding: 10px 12px;
-            border: 1px solid #ddd;
-            border-radius: 8px;
-            font-size: 0.95rem;
-            transition: all 0.3s ease;
-        }
-        
-        .payment-form .form-group input:focus,
-        .payment-form .form-group select:focus {
-            outline: none;
-            border-color: #4e54c8;
-            box-shadow: 0 0 0 3px rgba(78, 84, 200, 0.1);
-        }
-        
-        .form-row {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 15px;
-        }
-        
-        .buy-now-btn {
-            width: 100%;
-            background: linear-gradient(135deg, #4e54c8 0%, #8f94fb 100%);
-            color: white;
-            border: none;
-            padding: 12px;
-            border-radius: 8px;
-            font-size: 1rem;
-            font-weight: bold;
-            cursor: pointer;
-            margin-top: 15px;
-            transition: all 0.3s ease;
-        }
-        
-        .buy-now-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(78,84,200,0.3);
-        }
-        
-        .buy-now-btn:disabled {
-            opacity: 0.7;
-            cursor: not-allowed;
-            transform: none;
-        }
-        
-        .secure-payment {
-            text-align: center;
-            margin-top: 15px;
-            font-size: 0.8rem;
-            color: #666;
-        }
-        
-        .secure-payment i {
-            color: #20bf6b;
-            margin-right: 5px;
-        }
-        
-        .payment-info {
-            background: #f8f9fa;
-            padding: 15px;
-            border-radius: 8px;
-            margin: 15px 0;
-            text-align: center;
-        }
-        
-        .modal-header {
-            padding: 20px;
-            border-bottom: 1px solid #e9ecef;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            position: sticky;
-            top: 0;
-            background: white;
-            z-index: 1;
-        }
-        
-        .modal-header h2 {
-            color: #4e54c8;
-            font-size: 1.3rem;
-        }
-        
-        .close-modal {
-            background: none;
-            border: none;
-            font-size: 1.8rem;
-            cursor: pointer;
-            color: #666;
-            transition: color 0.3s ease;
-        }
-        
-        .close-modal:hover {
-            color: #ff6b6b;
-        }
-        
+        ${socialFeedCSS}
+        ${editModalCSS}
+        .ad-container { margin: 20px 0; text-align: center; background: #f8f9fa; padding: 15px; border-radius: 12px; border: 1px solid #e9ecef; }
+        .ad-label { font-size: 0.75rem; color: #6c757d; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px; }
+        .ad-banner-desktop { display: block; }
+        .ad-banner-mobile { display: none; }
+        .shorts-video-container { width: 100%; height: 500px; background: #000; display: flex; align-items: center; justify-content: center; position: relative; }
+        .shorts-video-container video { width: 100%; height: 100%; object-fit: contain; }
+        .video-duration { position: absolute; bottom: 10px; right: 10px; background: rgba(0,0,0,0.7); color: white; padding: 4px 8px; border-radius: 4px; font-size: 12px; z-index: 10; }
+        .ai-model-badge { background: #4e54c8; color: white; padding: 4px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 600; display: inline-flex; align-items: center; gap: 5px; margin-left: 10px; }
+        .price-badge { position: absolute; top: 10px; left: 10px; background: linear-gradient(135deg, #ff6b6b 0%, #ff8787 100%); color: white; padding: 4px 12px; border-radius: 20px; font-size: 0.8rem; font-weight: bold; z-index: 15; box-shadow: 0 2px 8px rgba(0,0,0,0.2); }
+        .price-badge.free { background: linear-gradient(135deg, #20bf6b 0%, #4cd964 100%); }
+        .buy-modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 10002; animation: fadeIn 0.3s ease; }
+        .buy-modal { background: white; border-radius: 15px; width: 90%; max-width: 800px; max-height: 90vh; overflow-y: auto; animation: slideUp 0.3s ease; }
+        .buy-modal-content { padding: 20px; display: grid; grid-template-columns: 1fr 1fr; gap: 30px; }
+        .prompt-preview { text-align: center; }
+        .buy-prompt-image { width: 100%; max-height: 200px; object-fit: cover; border-radius: 8px; margin-bottom: 15px; }
+        .prompt-price-large { font-size: 1.5rem; font-weight: bold; color: #ff6b6b; margin: 10px 0; }
+        .prompt-creator { color: #666; font-size: 0.9rem; }
+        .payment-form { padding: 0 15px; }
+        .payment-form h3 { margin-bottom: 15px; color: #2d334a; font-size: 1.1rem; }
+        .payment-form .form-group { margin-bottom: 15px; }
+        .payment-form .form-group label { display: block; margin-bottom: 5px; font-weight: 500; color: #2d334a; font-size: 0.9rem; }
+        .payment-form .form-group input, .payment-form .form-group select { width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 0.95rem; transition: all 0.3s ease; }
+        .payment-form .form-group input:focus, .payment-form .form-group select:focus { outline: none; border-color: #4e54c8; box-shadow: 0 0 0 3px rgba(78, 84, 200, 0.1); }
+        .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
+        .buy-now-btn { width: 100%; background: linear-gradient(135deg, #4e54c8 0%, #8f94fb 100%); color: white; border: none; padding: 12px; border-radius: 8px; font-size: 1rem; font-weight: bold; cursor: pointer; margin-top: 15px; transition: all 0.3s ease; }
+        .buy-now-btn:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(78,84,200,0.3); }
+        .buy-now-btn:disabled { opacity: 0.7; cursor: not-allowed; transform: none; }
+        .secure-payment { text-align: center; margin-top: 15px; font-size: 0.8rem; color: #666; }
+        .secure-payment i { color: #20bf6b; margin-right: 5px; }
+        .payment-info { background: #f8f9fa; padding: 15px; border-radius: 8px; margin: 15px 0; text-align: center; }
+        .modal-header { padding: 20px; border-bottom: 1px solid #e9ecef; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; background: white; z-index: 1; }
+        .modal-header h2 { color: #4e54c8; font-size: 1.3rem; }
+        .close-modal { background: none; border: none; font-size: 1.8rem; cursor: pointer; color: #666; transition: color 0.3s ease; }
+        .close-modal:hover { color: #ff6b6b; }
         @media (max-width: 768px) {
-            .buy-modal-content {
-                grid-template-columns: 1fr;
-                gap: 20px;
-            }
-            
-            .form-row {
-                grid-template-columns: 1fr;
-            }
-            
-            .shorts-video-container {
-                height: 400px;
-            }
-            
-            .ad-banner-desktop {
-                display: none;
-            }
-            
-            .ad-banner-mobile {
-                display: block;
-            }
+            .buy-modal-content { grid-template-columns: 1fr; gap: 20px; }
+            .form-row { grid-template-columns: 1fr; }
+            .shorts-video-container { height: 400px; }
+            .ad-banner-desktop { display: none; }
+            .ad-banner-mobile { display: block; }
         }
-        
+        @media (max-width: 480px) { .shorts-video-container { height: 350px; } }
+        .content-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1.5rem; margin-top: 1rem; }
+        .related-prompt-card { background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.1); transition: all 0.3s ease; border: 1px solid #e9ecef; position: relative; }
+        .related-prompt-card:hover { transform: translateY(-5px); box-shadow: 0 8px 20px rgba(0,0,0,0.15); }
+        .related-prompt-image { width: 100%; height: 200px; object-fit: cover; display: block; }
+        .related-prompt-content { padding: 1.25rem; }
+        .related-prompt-content h4 { color: #2d334a; margin-bottom: 1rem; font-size: 1.1rem; line-height: 1.4; min-height: 3em; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+        .site-header { background: white; box-shadow: 0 2px 10px rgba(0,0,0,0.1); position: sticky; top: 0; z-index: 1000; padding: 0.5rem 0; }
+        .header-container { max-width: 1200px; margin: 0 auto; padding: 0 1rem; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; }
+        .logo { display: flex; align-items: center; gap: 0.5rem; font-size: 1.25rem; font-weight: bold; color: #4e54c8; text-decoration: none; flex-shrink: 0; }
+        .logo img { width: 40px; height: 40px; border-radius: 8px; }
+        .nav-links { display: flex; gap: 1.5rem; list-style: none; flex-wrap: wrap; }
+        .nav-links a { text-decoration: none; color: #333; font-weight: 500; transition: color 0.3s ease; white-space: nowrap; font-size: 0.9rem; }
+        .nav-links a:hover { color: #4e54c8; }
+        .main-container { max-width: 1200px; margin: 1rem auto; padding: 0 1rem; }
+        .prompt-article { background: white; border-radius: 15px; box-shadow: 0 5px 15px rgba(0,0,0,0.1); overflow: hidden; }
+        .article-header { padding: 1.5rem; border-bottom: 1px solid #eee; }
+        .user-info { display: flex; align-items: center; gap: 10px; margin-bottom: 15px; color: #666; font-size: 0.9rem; flex-wrap: wrap; }
+        .article-title { color: #4e54c8; margin-bottom: 1rem; font-size: 1.75rem; line-height: 1.3; word-wrap: break-word; }
+        .prompt-image { width: 100%; height: auto; max-height: 500px; object-fit: cover; background: #f0f4f8; }
+        .prompt-content { padding: 1.5rem; }
+        .content-section { margin-bottom: 1.5rem; padding: 1.5rem; background: white; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .section-title { color: #2d334a; margin-bottom: 1rem; font-size: 1.3rem; }
+        .prompt-text { white-space: pre-wrap; font-family: 'Courier New', monospace; background: #f8f9fa; padding: 1.5rem; border-radius: 8px; border-left: 4px solid #4e54c8; font-size: 1rem; line-height: 1.5; overflow-x: auto; cursor: pointer; user-select: text; }
+        .prompt-text-wrapper { position: relative; }
+        .copy-hint { position: absolute; top: 10px; right: 10px; background: rgba(78, 84, 200, 0.8); color: white; padding: 4px 10px; border-radius: 12px; font-size: 0.75rem; opacity: 0; transition: opacity 0.3s ease; pointer-events: none; }
+        .prompt-text-wrapper:hover .copy-hint { opacity: 1; }
+        .prompt-meta { display: flex; gap: 1.5rem; margin: 1.5rem 0; padding: 1.5rem; background: #f8f9fa; border-radius: 10px; flex-wrap: wrap; }
+        .meta-item { display: flex; align-items: center; gap: 8px; font-size: 0.9rem; }
+        .meta-item strong { color: #4e54c8; font-weight: 600; }
+        .engagement-buttons { display: flex; gap: 1rem; margin: 1.5rem 0; flex-wrap: wrap; }
+        .engagement-btn { display: flex; align-items: center; gap: 8px; padding: 10px 20px; border: 2px solid #4e54c8; border-radius: 25px; background: white; cursor: pointer; transition: all 0.3s ease; text-decoration: none; color: inherit; font-weight: 500; font-size: 0.9rem; }
+        .engagement-btn:hover { background: #4e54c8; color: white; transform: translateY(-2px); }
+        .platform-intro { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 2rem; border-radius: 15px; margin: 1.5rem 0; position: relative; overflow: hidden; }
+        .platform-intro::before { content: ''; position: absolute; top: -50%; right: -50%; width: 100%; height: 200%; background: rgba(255,255,255,0.1); transform: rotate(45deg); }
+        .platform-intro p { position: relative; z-index: 1; font-size: 1.1rem; line-height: 1.7; margin: 0; }
+        .instruction-steps { display: flex; flex-direction: column; gap: 1rem; }
+        .instruction-step { display: flex; align-items: flex-start; gap: 1rem; padding: 1.5rem; background: #f8f9fa; border-radius: 12px; border-left: 5px solid #4e54c8; transition: all 0.3s ease; }
+        .instruction-step:hover { transform: translateX(5px); box-shadow: 0 5px 15px rgba(0,0,0,0.1); }
+        .step-number { background: #4e54c8; color: white; width: 30px; height: 30px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold; flex-shrink: 0; }
+        .step-content strong { color: #4e54c8; display: block; margin-bottom: 0.5rem; font-size: 1.1rem; }
+        .tips-list { list-style: none; padding: 0; }
+        .tips-list li { padding: 0.5rem 0; border-bottom: 1px solid #eee; position: relative; padding-left: 1.5rem; }
+        .tips-list li:before { content: "💡"; position: absolute; left: 0; }
+        .engagement-stats-small { display: flex; gap: 1.5rem; margin: 1rem 0; justify-content: center; flex-wrap: wrap; }
+        .stat-item-small { display: flex; flex-direction: column; align-items: center; gap: 0.25rem; padding: 0.75rem; background: rgba(78, 84, 200, 0.1); border-radius: 8px; min-width: 80px; }
+        .stat-item-small i { color: #4e54c8; font-size: 1.25rem; }
+        .stat-number-small { font-size: 1.25rem; font-weight: bold; color: #2d334a; }
+        .stat-label-small { font-size: 0.75rem; color: #666; text-transform: uppercase; letter-spacing: 0.5px; }
+        .copy-prompt-container { position: relative; margin: 1rem 0; }
+        .copy-prompt-btn { position: absolute; top: 10px; right: 10px; background: linear-gradient(135deg, #4e54c8 0%, #8f94fb 100%); color: white; border: none; border-radius: 20px; padding: 8px 16px; cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 0.9rem; font-weight: 600; box-shadow: 0 4px 15px rgba(78, 84, 200, 0.4); transition: all 0.3s ease; z-index: 10; }
+        .copy-prompt-btn:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(78, 84, 200, 0.6); background: linear-gradient(135deg, #3b41b5 0%, #7c82f0 100%); }
+        .copy-prompt-btn:active { transform: translateY(0); box-shadow: 0 2px 10px rgba(78, 84, 200, 0.4); }
+        .copy-prompt-btn.copied { background: linear-gradient(135deg, #20bf6b 0%, #4cd964 100%); }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes slideUp { from { transform: translateY(50px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        .site-footer { background: #2d334a; color: white; padding: 2rem 1rem; margin-top: 3rem; }
+        .footer-container { max-width: 1200px; margin: 0 auto; display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1.5rem; }
+        .footer-section h3 { margin-bottom: 1rem; color: #4e54c8; }
+        .footer-links { list-style: none; }
+        .footer-links li { margin-bottom: 0.5rem; }
+        .footer-links a { color: #ccc; text-decoration: none; transition: color 0.3s ease; }
+        .footer-links a:hover { color: #4e54c8; }
+        .copyright { text-align: center; margin-top: 2rem; padding-top: 2rem; border-top: 1px solid #444; color: #888; }
+        .copy-notification { position: fixed; bottom: 20px; right: 20px; padding: 12px 20px; border-radius: 8px; z-index: 10001; box-shadow: 0 2px 10px rgba(0,0,0,0.2); display: flex; align-items: center; gap: 10px; animation: slideInRight 0.3s ease; font-size: 0.9rem; }
+        @keyframes slideInRight { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+        @keyframes slideUpFade { from { opacity: 0; transform: translateX(-50%) translateY(30px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
+        @keyframes pulse { 0% { transform: translateX(-50%) scale(1); box-shadow: 0 8px 25px rgba(78, 84, 200, 0.4); } 50% { transform: translateX(-50%) scale(1.08); box-shadow: 0 12px 35px rgba(78, 84, 200, 0.7); } 100% { transform: translateX(-50%) scale(1); box-shadow: 0 8px 25px rgba(78, 84, 200, 0.4); } }
+        .download-notification { position: fixed; bottom: 100px; left: 50%; transform: translateX(-50%); background: #20bf6b; color: white; padding: 10px 20px; border-radius: 50px; z-index: 10001; font-size: 0.9rem; font-weight: 500; box-shadow: 0 4px 15px rgba(0,0,0,0.2); white-space: nowrap; }
+        .affiliate-container { margin: 20px 0; padding: 15px; background: #fff; border-radius: 12px; border: 1px solid #e9ecef; box-shadow: 0 2px 8px rgba(0,0,0,0.05); transition: transform 0.2s ease; }
+        .affiliate-container:hover { transform: translateY(-3px); box-shadow: 0 6px 20px rgba(0,0,0,0.1); }
+        .affiliate-content { display: flex; align-items: center; gap: 15px; text-decoration: none; color: inherit; }
+        .affiliate-image { width: 100px; height: 100px; object-fit: cover; border-radius: 8px; flex-shrink: 0; border: 2px solid #e9ecef; max-width: 100%; }
+        .affiliate-info { flex: 1; min-width: 0; }
+        .affiliate-info h4 { margin: 0 0 5px 0; color: #2d334a; font-size: 1.05rem; line-height: 1.3; }
+        .affiliate-info p { margin: 0; color: #666; font-size: 0.9rem; line-height: 1.4; }
+        .affiliate-cta { background: #4e54c8; color: white; padding: 6px 14px; border-radius: 20px; font-size: 0.8rem; font-weight: 600; white-space: nowrap; display: inline-block; margin-top: 8px; }
+        .affiliate-image-placeholder { width: 60px; height: 60px; min-width: 60px; background: #e9ecef; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 1.5rem; }
+        @media (max-width: 768px) {
+            .affiliate-content { flex-direction: row; align-items: flex-start; gap: 12px; }
+            .affiliate-image, .affiliate-image-placeholder { width: 70px; height: 70px; min-width: 70px; }
+            .affiliate-info h4 { font-size: 0.95rem; margin-bottom: 3px; }
+            .affiliate-info p { font-size: 0.8rem; line-height: 1.3; }
+            .affiliate-cta { font-size: 0.7rem; padding: 4px 10px; }
+        }
         @media (max-width: 480px) {
-            .shorts-video-container {
-                height: 350px;
-            }
+            .affiliate-image, .affiliate-image-placeholder { width: 60px; height: 60px; min-width: 60px; }
+            .affiliate-content { gap: 8px; }
         }
-        
-        .content-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            gap: 1.5rem;
-            margin-top: 1rem;
-        }
-
-        .related-prompt-card {
-            background: white;
-            border-radius: 12px;
-            overflow: hidden;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-            transition: all 0.3s ease;
-            border: 1px solid #e9ecef;
-            position: relative;
-        }
-
-        .related-prompt-card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 8px 20px rgba(0,0,0,0.15);
-        }
-
-        .related-prompt-image {
-            width: 100%;
-            height: 200px;
-            object-fit: cover;
-            display: block;
-        }
-
-        .related-prompt-content {
-            padding: 1.25rem;
-        }
-
-        .related-prompt-content h4 {
-            color: #2d334a;
-            margin-bottom: 1rem;
-            font-size: 1.1rem;
-            line-height: 1.4;
-            min-height: 3em;
-            display: -webkit-box;
-            -webkit-line-clamp: 2;
-            -webkit-box-orient: vertical;
-            overflow: hidden;
-        }
-
+        .user-profile { display: flex; align-items: center; gap: 12px; background: #f8f9fa; padding: 5px 15px 5px 10px; border-radius: 40px; border: 1px solid #e9ecef; transition: all 0.3s ease; }
+        .user-profile:hover { border-color: #4e54c8; box-shadow: 0 2px 12px rgba(78,84,200,0.15); }
+        .user-avatar { width: 36px; height: 36px; border-radius: 50%; object-fit: cover; border: 2px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,0.12); flex-shrink: 0; }
+        .user-profile span { font-weight: 500; color: #2d334a; font-size: 0.95rem; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .logout-btn { background: none; border: none; color: #ff6b6b; cursor: pointer; font-size: 1rem; padding: 6px 8px; border-radius: 50%; transition: all 0.3s ease; display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; }
+        .logout-btn:hover { background: #ffeaea; transform: scale(1.1); color: #e03131; }
+        .logout-btn i { font-size: 1rem; }
+        .user-profile-mini { display: flex; align-items: center; gap: 10px; background: #f8f9fa; padding: 4px 12px 4px 8px; border-radius: 40px; border: 1px solid #e9ecef; transition: all 0.3s ease; }
+        .user-profile-mini:hover { border-color: #4e54c8; }
+        .user-avatar-mini { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; border: 2px solid #fff; box-shadow: 0 2px 6px rgba(0,0,0,0.1); flex-shrink: 0; display: flex; align-items: center; justify-content: center; background: linear-gradient(135deg, #4e54c8, #8f94fb); color: #fff; font-weight: 700; font-size: 0.9rem; }
+        .user-name-mini { font-weight: 500; color: #2d334a; font-size: 0.85rem; max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .logout-btn-mini { background: none; border: none; color: #ff6b6b; cursor: pointer; font-size: 0.85rem; padding: 4px 6px; border-radius: 50%; transition: all 0.3s ease; display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; }
+        .logout-btn-mini:hover { background: #ffeaea; transform: scale(1.1); color: #e03131; }
+        .logout-btn-mini i { font-size: 0.85rem; }
+        .login-btn-header { background: linear-gradient(135deg, #4e54c8, #8f94fb); color: #fff; padding: 8px 20px; border-radius: 30px; text-decoration: none; font-weight: 600; font-size: 0.9rem; transition: all 0.3s ease; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+        .login-btn-header:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(78,84,200,0.35); color: #fff; }
         @media (max-width: 768px) {
-            .content-grid {
-                grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-                gap: 1rem;
-            }
-            
-            .related-prompt-image {
-                height: 180px;
-            }
+            .user-profile span { max-width: 80px; font-size: 0.85rem; }
+            .user-avatar { width: 30px; height: 30px; }
+            .user-profile { padding: 4px 10px 4px 6px; gap: 8px; }
+            .logout-btn { width: 28px; height: 28px; font-size: 0.85rem; }
+            .user-name-mini { max-width: 70px; font-size: 0.8rem; }
+            .user-avatar-mini { width: 28px; height: 28px; font-size: 0.8rem; }
+            .login-btn-header { padding: 6px 14px; font-size: 0.8rem; }
         }
-
         @media (max-width: 480px) {
-            .content-grid {
-                grid-template-columns: 1fr;
-            }
+            .user-profile span { display: none; }
+            .user-profile { padding: 4px 8px; gap: 4px; }
+            .user-name-mini { display: none; }
+            .user-profile-mini { padding: 4px 8px; gap: 4px; }
         }
-
-        .site-header { 
-            background: white; 
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            position: sticky;
-            top: 0;
-            z-index: 1000;
-            padding: 0.5rem 0;
-        }
-        .header-container {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 0 1rem;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-        }
-        .logo { 
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            font-size: 1.25rem; 
-            font-weight: bold; 
-            color: #4e54c8; 
-            text-decoration: none;
-            flex-shrink: 0;
-        }
-        .logo img {
-            width: 40px;
-            height: 40px;
-            border-radius: 8px;
-        }
-        .nav-links {
-            display: flex;
-            gap: 1.5rem;
-            list-style: none;
-            flex-wrap: wrap;
-        }
-        .nav-links a {
-            text-decoration: none;
-            color: #333;
-            font-weight: 500;
-            transition: color 0.3s ease;
-            white-space: nowrap;
-            font-size: 0.9rem;
-        }
-        .nav-links a:hover {
-            color: #4e54c8;
-        }
-        
-        .main-container { 
-            max-width: 1200px; 
-            margin: 1rem auto; 
-            padding: 0 1rem;
-        }
-        .prompt-article {
-            background: white;
-            border-radius: 15px;
-            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
-            overflow: hidden;
-        }
-        .article-header {
-            padding: 1.5rem;
-            border-bottom: 1px solid #eee;
-        }
-        .user-info { 
-            display: flex; 
-            align-items: center; 
-            gap: 10px; 
-            margin-bottom: 15px; 
-            color: #666; 
-            font-size: 0.9rem; 
-            flex-wrap: wrap; 
-        }
-        .article-title {
-            color: #4e54c8; 
-            margin-bottom: 1rem; 
-            font-size: 1.75rem; 
-            line-height: 1.3;
-            word-wrap: break-word;
-        }
-        
-        .prompt-image { 
-            width: 100%; 
-            height: auto; 
-            max-height: 500px;
-            object-fit: cover; 
-            background: #f0f4f8; 
-        }
-        
-        .prompt-content { 
-            padding: 1.5rem;
-        }
-        .content-section {
-            margin-bottom: 1.5rem;
-            padding: 1.5rem;
-            background: white;
-            border-radius: 10px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }
-        .section-title {
-            color: #2d334a;
-            margin-bottom: 1rem;
-            font-size: 1.3rem;
-        }
-        .prompt-text { 
-            white-space: pre-wrap; 
-            font-family: 'Courier New', monospace; 
-            background: #f8f9fa; 
-            padding: 1.5rem; 
-            border-radius: 8px; 
-            border-left: 4px solid #4e54c8; 
-            font-size: 1rem; 
-            line-height: 1.5;
-            overflow-x: auto;
-            cursor: pointer;
-            user-select: text;
-        }
-        
-        .prompt-text-wrapper {
-            position: relative;
-        }
-        
-        .copy-hint {
-            position: absolute;
-            top: 10px;
-            right: 10px;
-            background: rgba(78, 84, 200, 0.8);
-            color: white;
-            padding: 4px 10px;
-            border-radius: 12px;
-            font-size: 0.75rem;
-            opacity: 0;
-            transition: opacity 0.3s ease;
-            pointer-events: none;
-        }
-        
-        .prompt-text-wrapper:hover .copy-hint {
-            opacity: 1;
-        }
-        
-        .prompt-meta { 
-            display: flex; 
-            gap: 1.5rem; 
-            margin: 1.5rem 0; 
-            padding: 1.5rem; 
-            background: #f8f9fa; 
-            border-radius: 10px; 
-            flex-wrap: wrap; 
-        }
-        .meta-item { 
-            display: flex; 
-            align-items: center; 
-            gap: 8px; 
-            font-size: 0.9rem;
-        }
-        .meta-item strong { 
-            color: #4e54c8; 
-            font-weight: 600; 
-        }
-        
-        .engagement-buttons { 
-            display: flex; 
-            gap: 1rem; 
-            margin: 1.5rem 0; 
-            flex-wrap: wrap; 
-        }
-        .engagement-btn { 
-            display: flex; 
-            align-items: center; 
-            gap: 8px; 
-            padding: 10px 20px; 
-            border: 2px solid #4e54c8; 
-            border-radius: 25px; 
-            background: white; 
-            cursor: pointer; 
-            transition: all 0.3s ease; 
-            text-decoration: none; 
-            color: inherit; 
-            font-weight: 500;
-            font-size: 0.9rem;
-        }
-        .engagement-btn:hover { 
-            background: #4e54c8; 
-            color: white; 
-            transform: translateY(-2px); 
-        }
-        
-        .platform-intro {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 2rem;
-            border-radius: 15px;
-            margin: 1.5rem 0;
-            position: relative;
-            overflow: hidden;
-        }
-
-        .platform-intro::before {
-            content: '';
-            position: absolute;
-            top: -50%;
-            right: -50%;
-            width: 100%;
-            height: 200%;
-            background: rgba(255,255,255,0.1);
-            transform: rotate(45deg);
-        }
-
-        .platform-intro p {
-            position: relative;
-            z-index: 1;
-            font-size: 1.1rem;
-            line-height: 1.7;
-            margin: 0;
-        }
-        
-        .instruction-steps {
-            display: flex;
-            flex-direction: column;
-            gap: 1rem;
-        }
-        
-        .instruction-step {
-            display: flex;
-            align-items: flex-start;
-            gap: 1rem;
-            padding: 1.5rem;
-            background: #f8f9fa;
-            border-radius: 12px;
-            border-left: 5px solid #4e54c8;
-            transition: all 0.3s ease;
-        }
-        
-        .instruction-step:hover {
-            transform: translateX(5px);
-            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
-        }
-        
-        .step-number {
-            background: #4e54c8;
-            color: white;
-            width: 30px;
-            height: 30px;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: bold;
-            flex-shrink: 0;
-        }
-        
-        .step-content strong {
-            color: #4e54c8;
-            display: block;
-            margin-bottom: 0.5rem;
-            font-size: 1.1rem;
-        }
-        
-        .tips-list {
-            list-style: none;
-            padding: 0;
-        }
-        
-        .tips-list li {
-            padding: 0.5rem 0;
-            border-bottom: 1px solid #eee;
-            position: relative;
-            padding-left: 1.5rem;
-        }
-        
-        .tips-list li:before {
-            content: "💡";
-            position: absolute;
-            left: 0;
-        }
-        
-        .engagement-stats-small {
-            display: flex;
-            gap: 1.5rem;
-            margin: 1rem 0;
-            justify-content: center;
-            flex-wrap: wrap;
-        }
-
-        .stat-item-small {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            gap: 0.25rem;
-            padding: 0.75rem;
-            background: rgba(78, 84, 200, 0.1);
-            border-radius: 8px;
-            min-width: 80px;
-        }
-
-        .stat-item-small i {
-            color: #4e54c8;
-            font-size: 1.25rem;
-        }
-
-        .stat-number-small {
-            font-size: 1.25rem;
-            font-weight: bold;
-            color: #2d334a;
-        }
-
-        .stat-label-small {
-            font-size: 0.75rem;
-            color: #666;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-
-        .copy-prompt-container {
-            position: relative;
-            margin: 1rem 0;
-        }
-
-        .copy-prompt-btn {
-            position: absolute;
-            top: 10px;
-            right: 10px;
-            background: linear-gradient(135deg, #4e54c8 0%, #8f94fb 100%);
-            color: white;
-            border: none;
-            border-radius: 20px;
-            padding: 8px 16px;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 0.9rem;
-            font-weight: 600;
-            box-shadow: 0 4px 15px rgba(78, 84, 200, 0.4);
-            transition: all 0.3s ease;
-            z-index: 10;
-        }
-
-        .copy-prompt-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(78, 84, 200, 0.6);
-            background: linear-gradient(135deg, #3b41b5 0%, #7c82f0 100%);
-        }
-
-        .copy-prompt-btn:active {
-            transform: translateY(0);
-            box-shadow: 0 2px 10px rgba(78, 84, 200, 0.4);
-        }
-
-        .copy-prompt-btn.copied {
-            background: linear-gradient(135deg, #20bf6b 0%, #4cd964 100%);
-        }
-
-        .copy-prompt-btn.copied i {
-            animation: checkmark 0.5s ease;
-        }
-
-        @keyframes checkmark {
-            0% { transform: scale(0); }
-            50% { transform: scale(1.5); }
-            100% { transform: scale(1); }
-        }
-
-        @keyframes fadeIn {
-            from { opacity: 0; }
-            to { opacity: 1; }
-        }
-
-        @keyframes slideUp {
-            from { transform: translateY(50px); opacity: 0; }
-            to { transform: translateY(0); opacity: 1; }
-        }
-
-        @media (max-width: 768px) {
-            .engagement-stats-small {
-                gap: 1rem;
-            }
-            
-            .stat-item-small {
-                padding: 0.5rem;
-                min-width: 70px;
-            }
-            
-            .article-title {
-                font-size: 1.5rem;
-            }
-            
-            .shorts-video-container {
-                height: 300px;
-            }
-            
-            .prompt-image {
-                max-height: 300px;
-            }
-            
-            .instruction-step {
-                flex-direction: column;
-                text-align: center;
-            }
-            
-            .step-number {
-                align-self: center;
-            }
-            
-            .copy-prompt-btn {
-                padding: 6px 12px;
-                font-size: 0.8rem;
-                position: static;
-                width: 100%;
-                justify-content: center;
-                margin-top: 10px;
-            }
-        }
-        
-        @media (max-width: 480px) {
-            .article-title {
-                font-size: 1.3rem;
-            }
-            
-            .shorts-video-container {
-                height: 250px;
-            }
-            
-            .prompt-image {
-                max-height: 250px;
-            }
-            
-            .prompt-text {
-                padding: 1rem;
-                font-size: 0.9rem;
-            }
-        }
-        
-        .site-footer {
-            background: #2d334a;
-            color: white;
-            padding: 2rem 1rem;
-            margin-top: 3rem;
-        }
-        .footer-container {
-            max-width: 1200px;
-            margin: 0 auto;
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 1.5rem;
-        }
-        .footer-section h3 {
-            margin-bottom: 1rem;
-            color: #4e54c8;
-        }
-        .footer-links {
-            list-style: none;
-        }
-        .footer-links li {
-            margin-bottom: 0.5rem;
-        }
-        .footer-links a {
-            color: #ccc;
-            text-decoration: none;
-            transition: color 0.3s ease;
-        }
-        .footer-links a:hover {
-            color: #4e54c8;
-        }
-        .copyright {
-            text-align: center;
-            margin-top: 2rem;
-            padding-top: 2rem;
-            border-top: 1px solid #444;
-            color: #888;
-        }
-        
-        .copy-notification {
-            position: fixed;
-            bottom: 20px;
-            right: 20px;
-            padding: 12px 20px;
-            border-radius: 8px;
-            z-index: 10001;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            animation: slideInRight 0.3s ease;
-            font-size: 0.9rem;
-        }
-        
-        @keyframes slideInRight {
-            from { transform: translateX(100%); opacity: 0; }
-            to { transform: translateX(0); opacity: 1; }
-        }
-        
-        @keyframes slideOutRight {
-            from { transform: translateX(0); opacity: 1; }
-            to { transform: translateX(100%); opacity: 0; }
-        }
-        
-        @keyframes slideUpFade {
-            from { opacity: 0; transform: translateX(-50%) translateY(30px); }
-            to { opacity: 1; transform: translateX(-50%) translateY(0); }
-        }
-        
-        @keyframes pulse {
-            0% { transform: translateX(-50%) scale(1); box-shadow: 0 8px 25px rgba(78, 84, 200, 0.4); }
-            50% { transform: translateX(-50%) scale(1.08); box-shadow: 0 12px 35px rgba(78, 84, 200, 0.7); }
-            100% { transform: translateX(-50%) scale(1); box-shadow: 0 8px 25px rgba(78, 84, 200, 0.4); }
-        }
-        
-        .download-notification {
-            position: fixed;
-            bottom: 100px;
-            left: 50%;
-            transform: translateX(-50%);
-            background: #20bf6b;
-            color: white;
-            padding: 10px 20px;
-            border-radius: 50px;
-            z-index: 10001;
-            font-size: 0.9rem;
-            font-weight: 500;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
-            white-space: nowrap;
-        }
-        
-        /* Affiliate Styles */
-        .affiliate-container {
-            margin: 20px 0;
-            padding: 15px;
-            background: #fff;
-            border-radius: 12px;
-            border: 1px solid #e9ecef;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-            transition: transform 0.2s ease;
-        }
-        .affiliate-container:hover {
-            transform: translateY(-3px);
-            box-shadow: 0 6px 20px rgba(0,0,0,0.1);
-        }
-        .affiliate-link {
-            display: flex;
-            align-items: center;
-            gap: 15px;
-            text-decoration: none;
-            color: inherit;
-        }
-        .affiliate-image {
-            width: 80px;
-            height: 80px;
-            object-fit: cover;
-            border-radius: 8px;
-            flex-shrink: 0;
-        }
-        .affiliate-info {
-            flex: 1;
-        }
-        .affiliate-info h4 {
-            margin: 0 0 5px 0;
-            color: #2d334a;
-            font-size: 1.05rem;
-        }
-        .affiliate-info p {
-            margin: 0;
-            color: #666;
-            font-size: 0.9rem;
-            line-height: 1.4;
-        }
-        .affiliate-cta {
-            background: #4e54c8;
-            color: white;
-            padding: 6px 14px;
-            border-radius: 20px;
-            font-size: 0.8rem;
-            font-weight: 600;
-            white-space: nowrap;
-            display: inline-block;
-            margin-top: 4px;
-        }
-        @media (max-width: 768px) {
-            .affiliate-link {
-                flex-direction: column;
-                text-align: center;
-            }
-            .affiliate-image {
-                width: 100%;
-                height: auto;
-                max-height: 150px;
-            }
-
-        }
-
-/* ── User Profile & Avatar Styles ── */
-.user-profile {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    background: #f8f9fa;
-    padding: 5px 15px 5px 10px;
-    border-radius: 40px;
-    border: 1px solid #e9ecef;
-    transition: all 0.3s ease;
-}
-.user-profile:hover {
-    border-color: #4e54c8;
-    box-shadow: 0 2px 12px rgba(78,84,200,0.15);
-}
-.user-avatar {
-    width: 36px;
-    height: 36px;
-    border-radius: 50%;
-    object-fit: cover;
-    border: 2px solid #fff;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.12);
-    flex-shrink: 0;
-}
-.user-profile span {
-    font-weight: 500;
-    color: #2d334a;
-    font-size: 0.95rem;
-    max-width: 120px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-.logout-btn {
-    background: none;
-    border: none;
-    color: #ff6b6b;
-    cursor: pointer;
-    font-size: 1rem;
-    padding: 6px 8px;
-    border-radius: 50%;
-    transition: all 0.3s ease;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 32px;
-    height: 32px;
-}
-.logout-btn:hover {
-    background: #ffeaea;
-    transform: scale(1.1);
-    color: #e03131;
-}
-.logout-btn i {
-    font-size: 1rem;
-}
-
-/* Mini version for prompt pages */
-.user-profile-mini {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    background: #f8f9fa;
-    padding: 4px 12px 4px 8px;
-    border-radius: 40px;
-    border: 1px solid #e9ecef;
-    transition: all 0.3s ease;
-}
-.user-profile-mini:hover {
-    border-color: #4e54c8;
-}
-.user-avatar-mini {
-    width: 32px;
-    height: 32px;
-    border-radius: 50%;
-    object-fit: cover;
-    border: 2px solid #fff;
-    box-shadow: 0 2px 6px rgba(0,0,0,0.1);
-    flex-shrink: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: linear-gradient(135deg, #4e54c8, #8f94fb);
-    color: #fff;
-    font-weight: 700;
-    font-size: 0.9rem;
-}
-.user-name-mini {
-    font-weight: 500;
-    color: #2d334a;
-    font-size: 0.85rem;
-    max-width: 100px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-.logout-btn-mini {
-    background: none;
-    border: none;
-    color: #ff6b6b;
-    cursor: pointer;
-    font-size: 0.85rem;
-    padding: 4px 6px;
-    border-radius: 50%;
-    transition: all 0.3s ease;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-}
-.logout-btn-mini:hover {
-    background: #ffeaea;
-    transform: scale(1.1);
-    color: #e03131;
-}
-.logout-btn-mini i {
-    font-size: 0.85rem;
-}
-
-/* Login button in header */
-.login-btn-header {
-    background: linear-gradient(135deg, #4e54c8, #8f94fb);
-    color: #fff;
-    padding: 8px 20px;
-    border-radius: 30px;
-    text-decoration: none;
-    font-weight: 600;
-    font-size: 0.9rem;
-    transition: all 0.3s ease;
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    white-space: nowrap;
-}
-.login-btn-header:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 6px 20px rgba(78,84,200,0.35);
-    color: #fff;
-}
-
-/* Responsive tweaks */
-@media (max-width: 768px) {
-    .user-profile span {
-        max-width: 80px;
-        font-size: 0.85rem;
-    }
-    .user-avatar {
-        width: 30px;
-        height: 30px;
-    }
-    .user-profile {
-        padding: 4px 10px 4px 6px;
-        gap: 8px;
-    }
-    .logout-btn {
-        width: 28px;
-        height: 28px;
-        font-size: 0.85rem;
-    }
-    .user-name-mini {
-        max-width: 70px;
-        font-size: 0.8rem;
-    }
-    .user-avatar-mini {
-        width: 28px;
-        height: 28px;
-        font-size: 0.8rem;
-    }
-    .login-btn-header {
-        padding: 6px 14px;
-        font-size: 0.8rem;
-    }
-}
-@media (max-width: 480px) {
-    .user-profile span {
-        display: none;
-    }
-    .user-profile {
-        padding: 4px 8px;
-        gap: 4px;
-    }
-    .user-name-mini {
-        display: none;
-    }
-    .user-profile-mini {
-        padding: 4px 8px;
-        gap: 4px;
-    }
-}
     </style>
 </head>
 <body>
@@ -9013,7 +8604,6 @@ const socialBadgesHTML = `
                 <img src="https://www.toolsprompt.com/logo.png" alt="tools prompt Logo">
                 <span>Tools prompt</span>
             </a>
-            
             <nav>
                 <ul class="nav-links">
                     <li><a href="https://www.toolsprompt.com/">Home</a></li>
@@ -9023,9 +8613,8 @@ const socialBadgesHTML = `
                     <li><a href="https://www.toolsprompt.com/dashboard.html">Dashboard</a></li>
                 </ul>
             </nav>
-            
             <div class="auth-section" id="authSection">
-                <a href="https://www.toolsprompt.com/login.html" class="login-btn-header">Login / Register</a>
+                <a href="/login.html" class="login-btn-header" id="loginLink">Login / Register</a>
             </div>
         </div>
     </header>
@@ -9035,51 +8624,33 @@ const socialBadgesHTML = `
             <div class="article-header">
                 <div class="user-info">
                     <i class="fas fa-user-circle"></i>
-                    <span>Created by: ${promptData.userName}</span>
+                    <span>Created by: ${displayCreator}</span>
                     ${platformBadge}
                     ${priceBadge}
                     ${promptData.seoScore ? '<span style="background: #20bf6b; color: white; padding: 4px 8px; border-radius: 12px; font-size: 0.8rem; font-weight: 600; margin-left: 10px;">tools prompt: ' + promptData.seoScore + '/100</span>' : ''}
                     ${isVideo && promptData.hasCustomThumbnail ? '<span style="background: #20bf6b; color: white; padding: 4px 8px; border-radius: 12px; font-size: 0.8rem; font-weight: 600; margin-left: 10px;"><i class="fas fa-image"></i> Custom Thumbnail</span>' : ''}
                 </div>
                 <h1 class="article-title">${promptData.title}</h1>
-                
+                <button class="edit-prompt-btn" id="editPromptBtn" data-owner-id="${promptData.userId || ''}" style="display:none;">
+                    <i class="fas fa-edit"></i> Edit Prompt
+                </button>
                 <div class="engagement-stats-small" id="engagementStats">
-                    <div class="stat-item-small">
-                        <i class="fas fa-heart"></i>
-                        <span class="stat-number-small">${promptData.likes}</span>
-                        <span class="stat-label-small">Likes</span>
-                    </div>
-                    <div class="stat-item-small">
-                        <i class="fas fa-eye"></i>
-                        <span class="stat-number-small">${promptData.views}</span>
-                        <span class="stat-label-small">Views</span>
-                    </div>
-                    <div class="stat-item-small">
-                        <i class="far fa-comments"></i>
-                        <span class="stat-number-small comment-count">${promptData.commentCount || 0}</span>
-                        <span class="stat-label-small">Comments</span>
-                    </div>
-                    ${promptData.isPaid ? `
-                    <div class="stat-item-small">
-                        <i class="fas fa-shopping-cart"></i>
-                        <span class="stat-number-small">${promptData.salesCount || 0}</span>
-                        <span class="stat-label-small">Sales</span>
-                    </div>
-                    ` : ''}
+                    <div class="stat-item-small"><i class="fas fa-heart"></i><span class="stat-number-small">${promptData.likes}</span><span class="stat-label-small">Likes</span></div>
+                    <div class="stat-item-small"><i class="fas fa-eye"></i><span class="stat-number-small">${promptData.views}</span><span class="stat-label-small">Views</span></div>
+                    <div class="stat-item-small"><i class="far fa-comments"></i><span class="stat-number-small comment-count">${promptData.commentCount || 0}</span><span class="stat-label-small">Comments</span></div>
+                    ${promptData.isPaid ? `<div class="stat-item-small"><i class="fas fa-shopping-cart"></i><span class="stat-number-small">${promptData.salesCount || 0}</span><span class="stat-label-small">Sales</span></div>` : ''}
                 </div>
             </div>
 
-            <!-- Adsterra Ads - Top of content (high visibility) -->
             <div id="ezoic-pub-ad-placeholder-118"></div>
 <script>
     ezstandalone.cmd.push(function () {
         ezstandalone.showAds(118);
     });
 </script>
-            
+
             ${mediaDisplay}
 
-            <!-- AFFILIATE: TOP -->
             ${affiliateTop}
 
             <div class="prompt-content">
@@ -9093,14 +8664,11 @@ const socialBadgesHTML = `
                             <div class="prompt-text" id="promptText" oncontextmenu="handlePromptContextMenu(event)">
                                 ${promptData.promptText}
                             </div>
-                            <div class="copy-hint" id="copyHint">
-                                Click or tap to copy
-                            </div>
+                            <div class="copy-hint" id="copyHint">Click or tap to copy</div>
                         </div>
                     </div>
                 </section>
 
-                <!-- Adsterra Ads - Middle of content -->
                 <div id="ezoic-pub-ad-placeholder-119"></div>
           <script>
          ezstandalone.cmd.push(function () {
@@ -9115,72 +8683,66 @@ const socialBadgesHTML = `
                     </div>
                 </section>
 
-                <!-- AFFILIATE: MIDDLE -->
                 ${affiliateMiddle}
 
+                ${promptData.showPlatformComparison ? `
                 <section class="content-section">
                     <h2 class="section-title"><i class="fas fa-chart-bar"></i> AI Platform Comparison (${isVideo ? AIModelManager.getVideoModelCount() : AIModelManager.getPhotoModelCount()}+ Models)</h2>
                     ${promptData.platformComparison}
                 </section>
+                ` : ''}
 
+                ${promptData.showTopTools ? `
                 <section class="content-section">
                     <h2 class="section-title"><i class="fas fa-robot"></i> Top AI ${isVideo ? 'Video Editing' : 'Image Generation'} Tools</h2>
-                    <div class="tools-grid-enhanced">
-                        ${toolsHTML}
-                    </div>
+                    <div class="tools-grid-enhanced">${toolsHTML}</div>
                 </section>
+                ` : ''}
 
+                ${promptData.showModelTips ? `
                 <section class="content-section">
                     <h2 class="section-title"><i class="fas fa-cogs"></i> ${isVideo ? 'Video Editing' : 'Model-Specific'} Optimization Tips</h2>
                     ${promptData.modelSpecificTips}
                 </section>
+                ` : ''}
 
+                ${promptData.showHowTo ? `
                 <section class="content-section">
                     <h2 class="section-title"><i class="fas fa-list-ol"></i> How To ${isVideo ? 'Create This Video' : 'Use This Prompt'}</h2>
-                    <div class="instruction-steps">
-                        ${aiStepsHTML}
-                    </div>
+                    <div class="instruction-steps">${aiStepsHTML}</div>
                 </section>
+                ` : ''}
 
+                ${promptData.showExpertTips ? `
                 <section class="content-section">
                     <h2 class="section-title"><i class="fas fa-graduation-cap"></i> Expert Tips for Best Results</h2>
-                    <ul class="tips-list">
-                        ${aiExpertTipsHTML}
-                    </ul>
+                    <ul class="tips-list">${aiExpertTipsHTML}</ul>
                 </section>
+                ` : ''}
 
+                ${promptData.showUsageTips ? `
                 <section class="content-section">
                     <h2 class="section-title"><i class="fas fa-lightbulb"></i> Usage Tips</h2>
-                    <ul class="tips-list">
-                        ${tipsHTML}
-                    </ul>
+                    <ul class="tips-list">${tipsHTML}</ul>
                 </section>
+                ` : ''}
 
+                ${promptData.showOptimizationTips ? `
                 <section class="content-section">
                     <h2 class="section-title"><i class="fas fa-search"></i> Optimization Tips</h2>
-                    <ul class="tips-list">
-                        ${seoTipsHTML}
-                    </ul>
+                    <ul class="tips-list">${seoTipsHTML}</ul>
                 </section>
+                ` : ''}
 
                 <div class="engagement-buttons">
-                    ${miniBrowserToggleButton}
-                    <button class="engagement-btn like-btn" onclick="handleLike('${promptData.id}')">
-                        <i class="far fa-heart"></i> Like Prompt
-                    </button>
-                    <button class="engagement-btn use-btn" onclick="handleUse('${promptData.id}')">
-                        <i class="fas fa-download"></i> Mark as Used
-                    </button>
-                    <button class="engagement-btn share-btn" onclick="handleShare('${promptData.id}')">
-                        <i class="fas fa-share"></i> Share Prompt
-                    </button>
-                    <a href="https://www.toolsprompt.com/" class="engagement-btn">
-                        <i class="fas fa-home"></i> More Prompts
-                    </a>
+                    <button class="engagement-btn" onclick="toggleMiniBrowser()" title="Open tools prompt Browser (Ctrl+B)"><i class="fas fa-external-link-alt"></i> Quick Browse</button>
+                    <button class="engagement-btn like-btn" onclick="handleLike('${promptData.id}')"><i class="far fa-heart"></i> Like Prompt</button>
+                    <button class="engagement-btn reuse-btn" onclick="handleReuse('${promptData.id}')"><i class="fas fa-redo"></i> Reuse Prompt</button>
+                    <button class="engagement-btn share-btn" onclick="handleShare('${promptData.id}')"><i class="fas fa-share"></i> Share Prompt</button>
+                    <a href="https://www.toolsprompt.com/" class="engagement-btn"><i class="fas fa-home"></i> More Prompts</a>
                 </div>
             </div>
 
-            <!-- Adsterra Ads - Bottom of content -->
             <div id="ezoic-pub-ad-placeholder-120"></div>
 <script>
     ezstandalone.cmd.push(function () {
@@ -9188,67 +8750,40 @@ const socialBadgesHTML = `
     });
 </script>
 
-            <!-- AFFILIATE: BOTTOM -->
             ${affiliateBottom}
         </article>
-        
+
         <section class="content-section" style="margin-top: 2rem;">
             <h2 class="section-title"><i class="fas fa-images"></i> You Might Like:</h2>
-            <div class="content-grid" id="relatedPrompts">
-            </div>
+            <div class="content-grid" id="relatedPrompts"></div>
         </section>
 
         <section class="comment-section" id="commentSection">
             <h2><i class="far fa-comments"></i> Comments</h2>
-            
             <div class="comment-form">
                 <h3>Add a Comment</h3>
                 <form id="commentForm">
                     <div class="form-group">
                         <label for="commentContent">Your Comment *</label>
-                        <textarea 
-                            id="commentContent" 
-                            name="content" 
-                            placeholder="Share your thoughts about this ${isVideo ? 'video' : 'prompt'}..." 
-                            maxlength="1000"
-                            required></textarea>
-                        <small style="color: #666; display: block; margin-top: 0.5rem;">
-                            Max 1000 characters. Your comment will be publicly visible.
-                        </small>
+                        <textarea id="commentContent" name="content" placeholder="Share your thoughts about this ${isVideo ? 'video' : 'prompt'}..." maxlength="1000" required></textarea>
+                        <small style="color: #666; display: block; margin-top: 0.5rem;">Max 1000 characters. Your comment will be publicly visible.</small>
                     </div>
-                    
                     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem;">
-                        <div class="form-group">
-                            <label for="authorName">Name (optional)</label>
-                            <input type="text" id="authorName" name="authorName" placeholder="Your name">
-                        </div>
-                        <div class="form-group">
-                            <label for="authorEmail">Email (optional)</label>
-                            <input type="email" id="authorEmail" name="authorEmail" placeholder="your@email.com">
-                        </div>
+                        <div class="form-group"><label for="authorName">Name (optional)</label><input type="text" id="authorName" name="authorName" placeholder="Your name"></div>
+                        <div class="form-group"><label for="authorEmail">Email (optional)</label><input type="email" id="authorEmail" name="authorEmail" placeholder="your@email.com"></div>
                     </div>
-                    
-                    <div class="comment-form-notice">
-                        <strong>Note:</strong> Your email will not be published. It's only used to display your Gravatar if you have one.
-                    </div>
-                    
-                    <button type="submit" class="comment-submit-btn">
-                        <i class="far fa-paper-plane"></i> Post Comment
-                    </button>
+                    <div class="comment-form-notice"><strong>Note:</strong> Your email will not be published.</div>
+                    <button type="submit" class="comment-submit-btn"><i class="far fa-paper-plane"></i> Post Comment</button>
                 </form>
             </div>
-            
             <div class="comments-list" id="commentsList">
                 <div class="no-comments" id="noComments">
                     <i class="far fa-comment" style="font-size: 3rem; color: #ddd; margin-bottom: 1rem;"></i>
                     <p>No comments yet. Be the first to share your thoughts!</p>
                 </div>
             </div>
-            
             <div class="load-more-comments" id="loadMoreComments" style="display: none;">
-                <button class="load-more-btn" id="loadMoreBtn">
-                    <i class="fas fa-sync-alt"></i> Load More Comments
-                </button>
+                <button class="load-more-btn" id="loadMoreBtn"><i class="fas fa-sync-alt"></i> Load More Comments</button>
             </div>
         </section>
     </main>
@@ -9279,20 +8814,17 @@ const socialBadgesHTML = `
                 </ul>
             </div>
         </div>
-        <div class="copyright">
-            <p>&copy; 2026 toolsprompt.com All rights reserved. | AI Prompt Marketplace - Buy and Sell AI Prompts</p>
-        </div>
+        <div class="copyright"><p>&copy; 2026 toolsprompt.com All rights reserved. | AI Prompt Marketplace - Buy and Sell AI Prompts</p></div>
     </footer>
 
-    ${miniBrowserHTML}
+   
     ${socialBadgesHTML}
     ${downloadAppButtonHTMLWithStyle}
     ${aiGeneratorHTML}
+    ${socialFeedHTML}
+    ${editModalHTML}
 
 <script>
-// ==================== FIREBASE INITIALIZATION ====================
-    
-    // Firebase configuration
     var firebaseConfig = {
         apiKey: "AIzaSyCgc0xRtijpyPhOovfwg-MzyahsUFh-hiQ",
         authDomain: "toolsprompt-5b07e.firebaseapp.com",
@@ -9302,118 +8834,76 @@ const socialBadgesHTML = `
         appId: "1:402263780942:web:1013a347dbb72db6b31d1f",
         measurementId: "G-K4KXR4FZCP"
     };
-    
-    // Initialize Firebase
-    if (typeof firebase !== 'undefined' && !firebase.apps.length) {
-        firebase.initializeApp(firebaseConfig);
-        console.log('Firebase initialized on prompt page');
-    }
-    
-    // Auth state listener
+    if (typeof firebase !== 'undefined' && !firebase.apps.length) firebase.initializeApp(firebaseConfig);
+
     var currentUser = null;
     var authReady = false;
-    
     if (typeof firebase !== 'undefined' && firebase.auth) {
         firebase.auth().onAuthStateChanged(function(user) {
             currentUser = user;
             authReady = true;
-            console.log('Auth state changed:', user ? 'Logged in as ' + user.email : 'Not logged in');
-            
-            // Update navigation/header if needed
             updateUserUI(user);
-            
-            // Check for pending purchase after login
+            revealEditButtonIfOwner(user);
             checkPendingPurchase(user);
         });
     }
-    
+
+    function revealEditButtonIfOwner(user) {
+        var editBtn = document.getElementById('editPromptBtn');
+        if (!editBtn) return;
+        if (!user) { editBtn.style.display = 'none'; return; }
+        var ownerId = editBtn.getAttribute('data-owner-id');
+        if (ownerId && ownerId !== 'anonymous' && user.uid === ownerId) {
+            editBtn.style.display = 'inline-flex';
+            console.log('✅ Edit button revealed for owner:', user.uid);
+        } else {
+            editBtn.style.display = 'none';
+        }
+    }
+
     function updateUserUI(user) {
         var authSection = document.getElementById('authSection');
         if (!authSection) return;
-        
         if (user) {
             var displayName = user.displayName || user.email.split('@')[0] || 'User';
             var avatarUrl = user.photoURL || '';
             var initial = displayName.charAt(0).toUpperCase();
-            
-            authSection.innerHTML = 
-                '<div class="user-profile-mini">' +
-                    (avatarUrl ? 
-                        '<img src="' + avatarUrl + '" class="user-avatar-mini" alt="' + displayName + '">' :
-                        '<div class="user-avatar-mini">' + initial + '</div>'
-                    ) +
-                    '<span class="user-name-mini">' + displayName + '</span>' +
-                    '<button class="logout-btn-mini" title="Logout" id="logoutBtn"><i class="fas fa-sign-out-alt"></i></button>' +
-                '</div>';
-            
-            // Add logout handler
+            authSection.innerHTML = '<div class="user-profile-mini">' + (avatarUrl ? '<img src="' + avatarUrl + '" class="user-avatar-mini" alt="' + displayName + '">' : '<div class="user-avatar-mini">' + initial + '</div>') + '<span class="user-name-mini">' + displayName + '</span><button class="logout-btn-mini" title="Logout" id="logoutBtn"><i class="fas fa-sign-out-alt"></i></button></div>';
             setTimeout(function() {
                 var logoutBtn = document.getElementById('logoutBtn');
-                if (logoutBtn) {
-                    logoutBtn.addEventListener('click', function() {
-                        firebase.auth().signOut().then(function() {
-                            window.location.reload();
-                        }).catch(function(error) {
-                            console.error('Logout error:', error);
-                            window.location.reload();
-                        });
-                    });
-                }
+                if (logoutBtn) logoutBtn.addEventListener('click', function() { firebase.auth().signOut().then(function() { window.location.reload(); }).catch(function() { window.location.reload(); }); });
             }, 100);
-            
         } else {
-            authSection.innerHTML = '<a href="https://www.toolsprompt.com/login.html?returnUrl=' + encodeURIComponent(window.location.href) + '" class="login-btn-header">Login / Register</a>';
+            authSection.innerHTML = '<a href="/login.html" class="login-btn-header" id="loginLink">Login / Register</a>';
         }
     }
-    
+
     function checkPendingPurchase(user) {
         if (!user) return;
-        
         var pendingPurchase = localStorage.getItem('pendingPurchase');
         if (pendingPurchase) {
             try {
                 var purchaseData = JSON.parse(pendingPurchase);
-                console.log('Found pending purchase:', purchaseData);
                 localStorage.removeItem('pendingPurchase');
-                
-                // If we're on the same prompt page, trigger the buy modal
-                if (purchaseData.promptId === promptId) {
-                    setTimeout(function() {
-                        showCopyNotification('Login successful! You can now complete your purchase.', 'success');
-                    }, 500);
-                }
-            } catch (e) {
-                console.error('Error parsing pending purchase:', e);
-                localStorage.removeItem('pendingPurchase');
-            }
+                if (purchaseData.promptId === promptId) setTimeout(function() { showNotification('Login successful! You can now complete your purchase.', 'success'); }, 500);
+            } catch (e) { localStorage.removeItem('pendingPurchase'); }
         }
     }
-    
+
     function getCurrentUser() {
         return new Promise(function(resolve) {
-            if (authReady) {
-                resolve(currentUser);
-            } else if (typeof firebase !== 'undefined' && firebase.auth) {
-                var unsubscribe = firebase.auth().onAuthStateChanged(function(user) {
-                    unsubscribe();
-                    currentUser = user;
-                    authReady = true;
-                    resolve(user);
-                });
-            } else {
-                resolve(null);
-            }
+            if (authReady) resolve(currentUser);
+            else if (typeof firebase !== 'undefined' && firebase.auth) {
+                var unsubscribe = firebase.auth().onAuthStateChanged(function(user) { unsubscribe(); currentUser = user; authReady = true; resolve(user); });
+            } else resolve(null);
         });
     }
 
-    console.log('Initializing prompt page with marketplace');
-    
     var isVideo = ${isVideo};
     var promptId = '${promptData.id}';
     var isPaid = ${promptData.isPaid};
     var promptPrice = ${promptData.price};
-    
-    // Store prompt data safely
+
     var currentPromptData = {
         id: '${promptData.id}',
         title: document.querySelector('.article-title') ? document.querySelector('.article-title').textContent : '${promptData.title.replace(/'/g, "\\'")}',
@@ -9424,77 +8914,45 @@ const socialBadgesHTML = `
     };
 
     document.addEventListener('DOMContentLoaded', function() {
-        // Set current prompt text from the DOM
+        var loginLink = document.getElementById('loginLink');
+        if (loginLink) loginLink.href = '/login.html?returnUrl=' + encodeURIComponent(window.location.href);
         var promptTextEl = document.getElementById('promptText');
-        if (promptTextEl) {
-            currentPromptData.promptText = promptTextEl.textContent || promptTextEl.innerText;
-        }
-        
+        if (promptTextEl) currentPromptData.promptText = promptTextEl.textContent || promptTextEl.innerText;
         loadRelatedPrompts(promptId, '${(promptData.keywords || ['AI'])[0]}');
-        
-        // Setup copy/buy button
         var copyBtn = document.getElementById('copyPromptBtn');
         if (copyBtn) {
-            copyBtn.addEventListener('click', function(e) {
-                e.preventDefault();
-                e.stopPropagation();
-                handleCopyOrBuy();
-            });
-            
-            copyBtn.addEventListener('touchend', function(e) {
-                e.preventDefault();
-                e.stopPropagation();
-                handleCopyOrBuy();
-            });
+            copyBtn.addEventListener('click', function(e) { e.preventDefault(); e.stopPropagation(); handleCopyOrBuy(); });
+            copyBtn.addEventListener('touchend', function(e) { e.preventDefault(); e.stopPropagation(); handleCopyOrBuy(); });
         }
     });
 
     function handleCopyOrBuy() {
-        console.log('handleCopyOrBuy called, isPaid:', isPaid);
-        
-        if (isPaid) {
-            // Show buy modal
-            showBuyPromptModal(currentPromptData);
-        } else {
-            // Free prompt - copy directly
-            copyPromptToClipboard();
-        }
+        if (isPaid) showBuyPromptModal(currentPromptData);
+        else copyPromptToClipboard();
     }
 
     function copyPromptToClipboard() {
         var text = currentPromptData.promptText;
-        if (!text) {
-            var el = document.getElementById('promptText');
-            if (el) text = el.textContent || el.innerText;
-        }
-        
+        if (!text) { var el = document.getElementById('promptText'); if (el) text = el.textContent || el.innerText; }
         navigator.clipboard.writeText(text).then(function() {
             var btn = document.getElementById('copyPromptBtn');
             if (btn) {
                 btn.innerHTML = '<i class="fas fa-check"></i> Copied!';
                 btn.classList.add('copied');
                 btn.disabled = true;
-                setTimeout(function() {
-                    btn.innerHTML = '<i class="far fa-copy"></i> ' + (isPaid ? 'Buy for ₹' + promptPrice : 'Copy Prompt');
-                    btn.classList.remove('copied');
-                    btn.disabled = false;
-                }, 3000);
+                setTimeout(function() { btn.innerHTML = '<i class="far fa-copy"></i> ' + (isPaid ? 'Buy for ₹' + promptPrice : 'Copy Prompt'); btn.classList.remove('copied'); btn.disabled = false; }, 3000);
             }
             showNotification('Prompt copied!', 'success');
             trackCopyAction(promptId);
-        }).catch(function() {
-            showNotification('Failed to copy', 'error');
-        });
+        }).catch(function() { showNotification('Failed to copy', 'error'); });
     }
 
     function showNotification(message, type) {
         type = type || 'success';
         var notifs = document.querySelectorAll('.copy-notification');
         notifs.forEach(function(n) { n.remove(); });
-        
         var bg = type === 'success' ? '#20bf6b' : (type === 'error' ? '#ff6b6b' : '#4e54c8');
         var icon = type === 'success' ? 'check-circle' : (type === 'error' ? 'exclamation-circle' : 'info-circle');
-        
         var div = document.createElement('div');
         div.className = 'copy-notification';
         div.style.cssText = 'position:fixed;bottom:20px;right:20px;background:' + bg + ';color:white;padding:12px 20px;border-radius:8px;z-index:10001;box-shadow:0 2px 10px rgba(0,0,0,0.2);display:flex;align-items:center;gap:10px;font-size:0.9rem;';
@@ -9504,169 +8962,36 @@ const socialBadgesHTML = `
     }
 
     function trackCopyAction(pid) {
-        fetch('/api/prompt/' + pid + '/copy', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ promptId: pid, timestamp: new Date().toISOString() })
-        }).catch(function() {});
+        fetch('/api/prompt/' + pid + '/copy', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ promptId: pid, timestamp: new Date().toISOString() }) }).catch(function() {});
     }
 
-    function handlePromptClick(event) {
-        if (event.target.closest('.copy-prompt-btn')) return;
-        handleCopyOrBuy();
-    }
+    function handlePromptClick(event) { if (event.target.closest('.copy-prompt-btn')) return; handleCopyOrBuy(); }
+    function handlePromptContextMenu(event) { event.preventDefault(); handleCopyOrBuy(); return false; }
 
-    function handlePromptContextMenu(event) {
-        event.preventDefault();
-        handleCopyOrBuy();
-        return false;
-    }
-
-// ==================== SOCIAL BADGES TOGGLE ====================
 document.addEventListener('DOMContentLoaded', function() {
     const container = document.getElementById('socialBadgesContainer');
     const toggleBtn = document.getElementById('socialToggleBtn');
-    if (container && toggleBtn) {
-        toggleBtn.addEventListener('click', function(e) {
-            e.stopPropagation();
-            container.classList.toggle('collapsed');
-        });
-    }
+    if (container && toggleBtn) toggleBtn.addEventListener('click', function(e) { e.stopPropagation(); container.classList.toggle('collapsed'); });
 });
 
-    // ==================== BUY MODAL WITH ALL FIELDS ====================
-
     function showBuyPromptModal(prompt) {
-        console.log('Showing buy modal for:', prompt);
-        
-        // Remove existing modal
         var existing = document.getElementById('buyPromptModal');
         if (existing) existing.remove();
-        
-        var html = '';
-        html += '<div class="buy-modal-overlay" id="buyPromptModal">';
-        html += '<div class="buy-modal">';
-        html += '<div class="modal-header">';
-        html += '<h2><i class="fas fa-shopping-cart"></i> Purchase Prompt</h2>';
-        html += '<button class="close-modal" id="closeBuyModalBtn">&times;</button>';
-        html += '</div>';
-        html += '<div class="buy-modal-content">';
-        
-        // Preview section
-        html += '<div class="prompt-preview">';
-        html += '<img src="' + (prompt.imageUrl || '') + '" alt="" class="buy-prompt-image">';
-        html += '<h3>' + (prompt.title || 'Untitled') + '</h3>';
-        html += '<p class="prompt-price-large"><i class="fas fa-rupee-sign"></i> ' + (prompt.price || 0) + '</p>';
-        html += '<p class="prompt-creator">By: ' + (prompt.userName || 'Anonymous') + '</p>';
-        html += '</div>';
-        
-        // Payment form with ALL fields
-        html += '<div class="payment-form">';
-        html += '<h3>Customer Information</h3>';
-        
-        html += '<div class="form-group">';
-        html += '<label for="buyerName">Full Name *</label>';
-        html += '<input type="text" id="buyerName" required placeholder="As per your ID">';
-        html += '</div>';
-        
-        html += '<div class="form-group">';
-        html += '<label for="buyerEmail">Email *</label>';
-        html += '<input type="email" id="buyerEmail" required placeholder="your@email.com">';
-        html += '</div>';
-        
-        html += '<div class="form-group">';
-        html += '<label for="buyerPhone">Phone (Optional)</label>';
-        html += '<input type="tel" id="buyerPhone" placeholder="Mobile number">';
-        html += '</div>';
-        
-        html += '<h3>Billing Address</h3>';
-        
-        html += '<div class="form-group">';
-        html += '<label for="buyerAddress1">Address Line 1 *</label>';
-        html += '<input type="text" id="buyerAddress1" required placeholder="Street address">';
-        html += '</div>';
-        
-        html += '<div class="form-group">';
-        html += '<label for="buyerAddress2">Address Line 2 (Optional)</label>';
-        html += '<input type="text" id="buyerAddress2" placeholder="Apartment, suite, etc.">';
-        html += '</div>';
-        
-        html += '<div class="form-row">';
-        html += '<div class="form-group">';
-        html += '<label for="buyerCity">City *</label>';
-        html += '<input type="text" id="buyerCity" required>';
-        html += '</div>';
-        html += '<div class="form-group">';
-        html += '<label for="buyerState">State/Province</label>';
-        html += '<input type="text" id="buyerState" placeholder="Optional">';
-        html += '</div>';
-        html += '</div>';
-        
-        html += '<div class="form-row">';
-        html += '<div class="form-group">';
-        html += '<label for="buyerPostal">Postal Code *</label>';
-        html += '<input type="text" id="buyerPostal" required>';
-        html += '</div>';
-        html += '<div class="form-group">';
-        html += '<label for="buyerCountry">Country *</label>';
-        html += '<select id="buyerCountry" required>';
-        html += '<option value="IN">India</option>';
-        html += '<option value="US">United States</option>';
-        html += '<option value="GB">United Kingdom</option>';
-        html += '<option value="CA">Canada</option>';
-        html += '<option value="AU">Australia</option>';
-        html += '</select>';
-        html += '</div>';
-        html += '</div>';
-        
-        html += '<div class="payment-info">';
-        html += '<p style="margin:0;font-size:0.9rem;color:#666;"><i class="fas fa-shield-alt"></i> Secure payment powered by Razorpay</p>';
-        html += '<p style="margin:5px 0 0;font-size:0.8rem;color:#888;">Supports UPI, Credit/Debit Cards, Net Banking</p>';
-        html += '</div>';
-        
-        html += '<button class="buy-now-btn" id="buyNowBtn"><i class="fas fa-rupee-sign"></i> Pay ₹' + (prompt.price || 0) + '</button>';
-        html += '<p class="secure-payment"><i class="fas fa-lock"></i> Secure payment powered by Razorpay</p>';
-        html += '</div>';
-        
-        html += '</div>';
-        html += '</div>';
-        html += '</div>';
-        
+        var html = '<div class="buy-modal-overlay" id="buyPromptModal"><div class="buy-modal"><div class="modal-header"><h2><i class="fas fa-shopping-cart"></i> Purchase Prompt</h2><button class="close-modal" id="closeBuyModalBtn">&times;</button></div><div class="buy-modal-content"><div class="prompt-preview"><img src="' + (prompt.imageUrl || '') + '" alt="" class="buy-prompt-image"><h3>' + (prompt.title || 'Untitled') + '</h3><p class="prompt-price-large"><i class="fas fa-rupee-sign"></i> ' + (prompt.price || 0) + '</p><p class="prompt-creator">By: ' + (prompt.userName || 'Anonymous') + '</p></div><div class="payment-form"><h3>Customer Information</h3><div class="form-group"><label for="buyerName">Full Name *</label><input type="text" id="buyerName" required placeholder="As per your ID"></div><div class="form-group"><label for="buyerEmail">Email *</label><input type="email" id="buyerEmail" required placeholder="your@email.com"></div><div class="form-group"><label for="buyerPhone">Phone (Optional)</label><input type="tel" id="buyerPhone" placeholder="Mobile number"></div><h3>Billing Address</h3><div class="form-group"><label for="buyerAddress1">Address Line 1 *</label><input type="text" id="buyerAddress1" required placeholder="Street address"></div><div class="form-group"><label for="buyerAddress2">Address Line 2 (Optional)</label><input type="text" id="buyerAddress2" placeholder="Apartment, suite, etc."></div><div class="form-row"><div class="form-group"><label for="buyerCity">City *</label><input type="text" id="buyerCity" required></div><div class="form-group"><label for="buyerState">State/Province</label><input type="text" id="buyerState" placeholder="Optional"></div></div><div class="form-row"><div class="form-group"><label for="buyerPostal">Postal Code *</label><input type="text" id="buyerPostal" required></div><div class="form-group"><label for="buyerCountry">Country *</label><select id="buyerCountry" required><option value="IN">India</option><option value="US">United States</option><option value="GB">United Kingdom</option><option value="CA">Canada</option><option value="AU">Australia</option></select></div></div><div class="payment-info"><p style="margin:0;font-size:0.9rem;color:#666;"><i class="fas fa-shield-alt"></i> Secure payment powered by Razorpay</p><p style="margin:5px 0 0;font-size:0.8rem;color:#888;">Supports UPI, Credit/Debit Cards, Net Banking</p></div><button class="buy-now-btn" id="buyNowBtn"><i class="fas fa-rupee-sign"></i> Pay ₹' + (prompt.price || 0) + '</button><p class="secure-payment"><i class="fas fa-lock"></i> Secure payment powered by Razorpay</p></div></div></div></div>';
         document.body.insertAdjacentHTML('beforeend', html);
         document.body.style.overflow = 'hidden';
-        
-        // Setup close button
         document.getElementById('closeBuyModalBtn').addEventListener('click', closeBuyModal);
-        
-        // Close on overlay click
-        document.getElementById('buyPromptModal').addEventListener('click', function(e) {
-            if (e.target === this) closeBuyModal();
-        });
-        
-        // Setup buy button
-        document.getElementById('buyNowBtn').addEventListener('click', function() {
-            processPurchase(prompt);
-        });
-        
-        // Escape key
-        document.addEventListener('keydown', function escHandler(e) {
-            if (e.key === 'Escape') {
-                closeBuyModal();
-                document.removeEventListener('keydown', escHandler);
-            }
-        });
+        document.getElementById('buyPromptModal').addEventListener('click', function(e) { if (e.target === this) closeBuyModal(); });
+        document.getElementById('buyNowBtn').addEventListener('click', function() { processPurchase(prompt); });
+        document.addEventListener('keydown', function escHandler(e) { if (e.key === 'Escape') { closeBuyModal(); document.removeEventListener('keydown', escHandler); } });
     }
 
     function closeBuyModal() {
         var modal = document.getElementById('buyPromptModal');
-        if (modal) {
-            modal.remove();
-            document.body.style.overflow = '';
-        }
+        if (modal) { modal.remove(); document.body.style.overflow = ''; }
     }
 
     function processPurchase(prompt) {
-        // Get form values
         var name = document.getElementById('buyerName')?.value?.trim() || '';
         var email = document.getElementById('buyerEmail')?.value?.trim() || '';
         var phone = document.getElementById('buyerPhone')?.value?.trim() || '';
@@ -9676,31 +9001,12 @@ document.addEventListener('DOMContentLoaded', function() {
         var state = document.getElementById('buyerState')?.value?.trim() || '';
         var postal = document.getElementById('buyerPostal')?.value?.trim() || '';
         var country = document.getElementById('buyerCountry')?.value || 'IN';
-        
-        // Validate required fields
         if (!name) { showNotification('Please enter your full name', 'error'); return; }
         if (!email) { showNotification('Please enter your email', 'error'); return; }
         if (!address1) { showNotification('Please enter your address', 'error'); return; }
         if (!city) { showNotification('Please enter your city', 'error'); return; }
         if (!postal) { showNotification('Please enter postal code', 'error'); return; }
-        
-        var customerInfo = {
-            name: name,
-            email: email,
-            phone: phone,
-            address: {
-                line1: address1,
-                line2: address2,
-                city: city,
-                state: state,
-                postal_code: postal,
-                country: country
-            }
-        };
-        
-        console.log('Processing purchase with customer info:', customerInfo);
-        
-        // Start payment
+        var customerInfo = { name: name, email: email, phone: phone, address: { line1: address1, line2: address2, city: city, state: state, postal_code: postal, country: country } };
         initiatePayment(prompt, customerInfo);
     }
 
@@ -9709,72 +9015,34 @@ document.addEventListener('DOMContentLoaded', function() {
         var originalText = buyBtn.innerHTML;
         buyBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Creating order...';
         buyBtn.disabled = true;
-        
         try {
-            // Wait for auth to be ready
             var user = await getCurrentUser();
-            
             if (!user) {
                 showNotification('Please login to complete your purchase', 'info');
-                
-                // Store purchase data for after login
-                localStorage.setItem('pendingPurchase', JSON.stringify({
-                    promptId: prompt.id,
-                    price: prompt.price,
-                    title: prompt.title,
-                    returnUrl: window.location.href,
-                    timestamp: Date.now()
-                }));
-                
-                // Also store customer info temporarily
+                localStorage.setItem('pendingPurchase', JSON.stringify({ promptId: prompt.id, price: prompt.price, title: prompt.title, returnUrl: window.location.href, timestamp: Date.now() }));
                 localStorage.setItem('pendingCustomerInfo', JSON.stringify(customerInfo));
-                
                 buyBtn.innerHTML = originalText;
                 buyBtn.disabled = false;
-                
-                // Redirect to login
-                setTimeout(function() {
-                    window.location.href = '/login.html?returnUrl=' + encodeURIComponent(window.location.href);
-                }, 1000);
+                setTimeout(function() { window.location.href = '/login.html?returnUrl=' + encodeURIComponent(window.location.href); }, 1000);
                 return;
             }
-            
-            // User is logged in, restore customer info if available
             var pendingInfo = localStorage.getItem('pendingCustomerInfo');
             if (pendingInfo) {
-                try {
-                    customerInfo = JSON.parse(pendingInfo);
-                    localStorage.removeItem('pendingCustomerInfo');
-                } catch(e) {}
+                try { customerInfo = JSON.parse(pendingInfo); localStorage.removeItem('pendingCustomerInfo'); } catch(e) {}
             }
-            
-            // Create order
             var response = await fetch('/api/create-order', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    promptId: prompt.id,
-                    price: prompt.price,
-                    userId: user.uid,
-                    userEmail: user.email || customerInfo.email,
-                    customerName: customerInfo.name,
-                    customerPhone: customerInfo.phone
-                })
+                body: JSON.stringify({ promptId: prompt.id, price: prompt.price, userId: user.uid, userEmail: user.email || customerInfo.email, customerName: customerInfo.name, customerPhone: customerInfo.phone })
             });
-            
             if (!response.ok) throw new Error('Server error: ' + response.status);
-            
             var data = await response.json();
-            console.log('Order created:', data);
-            
             if (data.isDemo) {
                 buyBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Completing...';
                 await completePurchase(prompt, user, 'demo_' + Date.now());
                 closeBuyModal();
                 return;
             }
-            
-            // Load Razorpay
             if (typeof Razorpay === 'undefined') {
                 await new Promise(function(resolve, reject) {
                     var script = document.createElement('script');
@@ -9784,82 +9052,40 @@ document.addEventListener('DOMContentLoaded', function() {
                     document.head.appendChild(script);
                 });
             }
-            
-            // Open Razorpay checkout
             var options = {
-                key: data.keyId,
-                amount: data.amount,
-                currency: data.currency || 'INR',
-                name: 'Tools Prompt',
-                description: 'Purchase: ' + (prompt.title || 'Prompt'),
+                key: data.keyId, amount: data.amount, currency: data.currency || 'INR',
+                name: 'Tools Prompt', description: 'Purchase: ' + (prompt.title || 'Prompt'),
                 order_id: data.orderId,
                 handler: async function(response) {
                     buyBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Verifying...';
-                    
                     try {
                         var verifyRes = await fetch('/api/verify-payment', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                orderId: response.razorpay_order_id,
-                                paymentId: response.razorpay_payment_id,
-                                signature: response.razorpay_signature,
-                                promptId: prompt.id,
-                                userId: user.uid,
-                                userEmail: user.email || customerInfo.email,
-                                amount: prompt.price
-                            })
+                            body: JSON.stringify({ orderId: response.razorpay_order_id, paymentId: response.razorpay_payment_id, signature: response.razorpay_signature, promptId: prompt.id, userId: user.uid, userEmail: user.email || customerInfo.email, amount: prompt.price })
                         });
-                        
                         var verifyData = await verifyRes.json();
-                        
                         if (verifyData.success) {
                             showNotification('Payment successful! Prompt copied.', 'success');
                             await navigator.clipboard.writeText(prompt.promptText || currentPromptData.promptText);
                             closeBuyModal();
-                        } else {
-                            showNotification('Verification failed: ' + (verifyData.error || 'Unknown error'), 'error');
-                        }
+                        } else showNotification('Verification failed: ' + (verifyData.error || 'Unknown error'), 'error');
                     } catch (e) {
                         console.error('Verification error:', e);
                         showNotification('Payment recorded. Check your dashboard.', 'info');
                         closeBuyModal();
                     }
-                    
                     buyBtn.innerHTML = originalText;
                     buyBtn.disabled = false;
                 },
-                modal: {
-                    ondismiss: function() {
-                        showNotification('Payment cancelled', 'info');
-                        buyBtn.innerHTML = originalText;
-                        buyBtn.disabled = false;
-                    }
-                },
+                modal: { ondismiss: function() { showNotification('Payment cancelled', 'info'); buyBtn.innerHTML = originalText; buyBtn.disabled = false; } },
                 theme: { color: '#4e54c8' },
-                prefill: {
-                    name: customerInfo.name,
-                    email: user.email || customerInfo.email,
-                    contact: customerInfo.phone
-                },
-                notes: {
-                    promptId: prompt.id,
-                    userId: user.uid,
-                    promptTitle: prompt.title
-                }
+                prefill: { name: customerInfo.name, email: user.email || customerInfo.email, contact: customerInfo.phone },
+                notes: { promptId: prompt.id, userId: user.uid, promptTitle: prompt.title }
             };
-            
             var rzp = new Razorpay(options);
-            
-            rzp.on('payment.failed', function(response) {
-                console.error('Payment failed:', response.error);
-                showNotification('Payment failed: ' + (response.error?.description || 'Try again'), 'error');
-                buyBtn.innerHTML = originalText;
-                buyBtn.disabled = false;
-            });
-            
+            rzp.on('payment.failed', function(response) { console.error('Payment failed:', response.error); showNotification('Payment failed: ' + (response.error?.description || 'Try again'), 'error'); buyBtn.innerHTML = originalText; buyBtn.disabled = false; });
             rzp.open();
-            
         } catch (error) {
             console.error('Payment error:', error);
             showNotification(error.message || 'Payment failed', 'error');
@@ -9873,108 +9099,59 @@ document.addEventListener('DOMContentLoaded', function() {
             var response = await fetch('/api/complete-purchase', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    promptId: prompt.id,
-                    userId: user.uid,
-                    userEmail: user.email,
-                    amount: prompt.price,
-                    paymentId: paymentId
-                })
+                body: JSON.stringify({ promptId: prompt.id, userId: user.uid, userEmail: user.email, amount: prompt.price, paymentId: paymentId })
             });
-            
             var data = await response.json();
-            
-            if (data.success) {
-                showNotification('Purchase successful! Prompt copied.', 'success');
-                await navigator.clipboard.writeText(prompt.promptText || currentPromptData.promptText);
-            } else {
-                showNotification(data.error || 'Purchase failed', 'error');
-            }
+            if (data.success) { showNotification('Purchase successful! Prompt copied.', 'success'); await navigator.clipboard.writeText(prompt.promptText || currentPromptData.promptText); }
+            else showNotification(data.error || 'Purchase failed', 'error');
         } catch (error) {
             console.error('Complete purchase error:', error);
             showNotification('Purchase error', 'error');
         }
     }
 
-    function getCurrentUser() {
-        return new Promise(function(resolve) {
-            if (typeof firebase !== 'undefined' && firebase.auth) {
-                var unsubscribe = firebase.auth().onAuthStateChanged(function(user) {
-                    unsubscribe();
-                    resolve(user);
-                });
-            } else {
-                resolve(null);
-            }
-        });
-    }
-
-    // Like, Use, Share handlers
     function handleLike(pid) {
         var btn = document.querySelector('.like-btn');
         if (!btn) return;
         var liked = btn.classList.contains('liked');
-        fetch('/api/prompt/' + pid + '/like', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ userId: 'anonymous', action: liked ? 'unlike' : 'like' })
-        }).then(function(r) {
+        fetch('/api/prompt/' + pid + '/like', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: 'anonymous', action: liked ? 'unlike' : 'like' }) }).then(function(r) {
             if (r.ok) {
-                if (liked) {
-                    btn.innerHTML = '<i class="far fa-heart"></i> Like Prompt';
-                    btn.classList.remove('liked');
-                } else {
-                    btn.innerHTML = '<i class="fas fa-heart"></i> Liked';
-                    btn.classList.add('liked');
-                }
+                if (liked) { btn.innerHTML = '<i class="far fa-heart"></i> Like Prompt'; btn.classList.remove('liked'); }
+                else { btn.innerHTML = '<i class="fas fa-heart"></i> Liked'; btn.classList.add('liked'); }
             }
         });
     }
-    
-    function handleUse(pid) {
-        var btn = document.querySelector('.use-btn');
+
+    function handleReuse(pid) {
+        var btn = document.querySelector('.reuse-btn');
         if (!btn) return;
-        fetch('/api/prompt/' + pid + '/use', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ userId: 'anonymous' })
-        }).then(function(r) {
-            if (r.ok) {
-                btn.innerHTML = '<i class="fas fa-check"></i> Used!';
-                btn.classList.add('used');
-                setTimeout(function() {
-                    btn.innerHTML = '<i class="fas fa-download"></i> Mark as Used';
-                    btn.classList.remove('used');
-                }, 3000);
-            }
-        });
+        var promptData = currentPromptData;
+        var isPaid = promptData.price > 0;
+        var hasPurchased = ${promptData.hasPurchased};
+        if (isPaid && !hasPurchased) { showBuyPromptModal(promptData); return; }
+        var promptText = promptData.promptText || '';
+        if (!promptText) { var textEl = document.getElementById('promptText'); if (textEl) promptText = textEl.textContent || textEl.innerText; }
+        var input = document.getElementById('aiPromptInput');
+        var bar = document.getElementById('aiGeneratorBar');
+        if (input && promptText) {
+            input.value = promptText;
+            input.style.height = 'auto';
+            input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+            if (bar && !bar.classList.contains('active')) bar.classList.add('active');
+            input.focus();
+            input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            showNotification('Prompt copied to AI generator!', 'success');
+        } else showNotification('AI generator not available', 'error');
     }
-    
+
     function handleShare(pid) {
         var url = window.location.href;
-        if (navigator.share) {
-            navigator.share({ title: document.title, text: 'Check this out!', url: url }).catch(function() {
-                copyText(url);
-            });
-        } else {
-            copyText(url);
-            showNotification('Link copied!', 'success');
-        }
+        if (navigator.share) navigator.share({ title: document.title, text: 'Check this out!', url: url }).catch(function() { copyText(url); });
+        else { copyText(url); showNotification('Link copied!', 'success'); }
     }
 
     function copyText(text) {
-        if (navigator.clipboard) {
-            navigator.clipboard.writeText(text).catch(function() {
-                var ta = document.createElement('textarea');
-                ta.value = text;
-                ta.style.position = 'fixed';
-                ta.style.opacity = '0';
-                document.body.appendChild(ta);
-                ta.select();
-                document.execCommand('copy');
-                document.body.removeChild(ta);
-            });
-        }
+        if (navigator.clipboard) navigator.clipboard.writeText(text).catch(function() { var ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); });
     }
 
     function loadRelatedPrompts(currentId, keyword) {
@@ -9988,24 +9165,26 @@ document.addEventListener('DOMContentLoaded', function() {
                     var p = data.prompts[i];
                     if (p && p.id && p.id !== currentId) {
                         var img = p.thumbnailUrl || p.imageUrl || 'https://via.placeholder.com/300x200/4e54c8/white?text=Prompt';
-                        html += '<div class="related-prompt-card"><img src="' + img + '" class="related-prompt-image">' +
-                            '<div class="related-prompt-content"><h4>' + (p.title || '').substring(0, 50) + '</h4>' +
-                            '<a href="/prompt/' + p.id + '" class="engagement-btn">View</a></div></div>';
+                        html += '<div class="related-prompt-card"><img src="' + img + '" class="related-prompt-image"><div class="related-prompt-content"><h4>' + (p.title || '').substring(0, 50) + '</h4><a href="/prompt/' + p.id + '" class="engagement-btn">View</a></div></div>';
                         count++;
                     }
                 }
                 container.innerHTML = html || '<div style="text-align:center;padding:2rem;">No related prompts</div>';
             })
-            .catch(function() {
-                var c = document.getElementById('relatedPrompts');
-                if (c) c.innerHTML = '<div style="text-align:center;padding:2rem;">Error loading</div>';
-            });
+            .catch(function() { var c = document.getElementById('relatedPrompts'); if (c) c.innerHTML = '<div style="text-align:center;padding:2rem;">Error loading</div>'; });
     }
 
-    ${miniBrowserJS}
-    ${downloadAppJS}
-    ${aiGeneratorJS}
-    ${generateCommentSystemJS(promptData)}
+
+${downloadAppJS}
+${aiGeneratorJS}
+${generateCommentSystemJS(promptData)}
+${socialFeedJS}
+${editModalJS}
+
+function openAffiliateUrls(url1, url2) {
+  if (url1) window.open(url1, '_blank');
+  if (url2) window.open(url2, '_blank');
+}
 </script>
 </body>
 </html>`;
@@ -10020,10 +9199,8 @@ function generateCategoryHTML(category, baseUrl) {
     'video': 'AI Video Reels',
     'other': 'Other AI Creations'
   };
-  
   const categoryName = categoryNames[category] || 'AI Prompts';
   const description = `Explore ${categoryName} prompts and AI-generated content. Discover the best prompt engineering techniques for ${categoryName.toLowerCase()}.`;
-
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -10052,15 +9229,8 @@ function generateNewsHTML(newsData) {
   const adsenseCode = generateAdSenseCode();
   const baseUrl = process.env.NODE_ENV === 'production' ? 'https://www.toolsprompt.com' : '';
   const newsUrl = baseUrl + '/news/' + newsData.id;
-  
-  const tagsHTML = (newsData.tags || []).map(tag => 
-    '<meta property="article:tag" content="' + tag + '">'
-  ).join('');
-  
-  const contentHTML = (newsData.content || '').split('\n').map(paragraph => 
-    '<p>' + paragraph + '</p>'
-  ).join('');
-  
+  const tagsHTML = (newsData.tags || []).map(tag => '<meta property="article:tag" content="' + tag + '">').join('');
+  const contentHTML = (newsData.content || '').split('\n').map(paragraph => '<p>' + paragraph + '</p>').join('');
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -10103,10 +9273,7 @@ function generateNewsHTML(newsData) {
         <header class="news-header">
             ${newsData.isBreaking ? '<span class="breaking-badge">BREAKING NEWS</span>' : ''}
             <h1 class="news-title">${newsData.title}</h1>
-            <div class="news-meta">
-                By ${newsData.author} | ${new Date(newsData.publishedAt).toLocaleDateString()} | 
-                ${newsData.views} views | ${newsData.category}
-            </div>
+            <div class="news-meta">By ${newsData.author} | ${new Date(newsData.publishedAt).toLocaleDateString()} | ${newsData.views} views | ${newsData.category}</div>
         </header>
         <div class="ad-container"><div class="ad-label">Advertisement</div></div>
         <img src="${newsData.imageUrl}" alt="${newsData.title}" class="news-image">
@@ -10120,9 +9287,7 @@ function generateNewsHTML(newsData) {
             var currentHost = window.location.hostname;
             if (currentHost === 'toolsprompt.com') {
                 var targetUrl = 'https://www.toolsprompt.com' + window.location.pathname + window.location.search + window.location.hash;
-                if (window.location.href !== targetUrl) {
-                    window.location.replace(targetUrl);
-                }
+                if (window.location.href !== targetUrl) window.location.replace(targetUrl);
             }
         })();
     </script>
@@ -10146,17 +9311,15 @@ function sendNewsErrorPage(res, error) {
   res.status(500).send(`<!DOCTYPE html><html><head><title>Error - tools prompt News</title></head><body><h1>Error Loading News</h1><p>There was an error loading this news article. Please try again later.</p><a href="/">Return Home</a></body></html>`);
 }
 
-// Simple 404 handler
 app.use((req, res) => {
   res.status(404).send(`<!DOCTYPE html><html><head><title>Page Not Found</title></head><body><h1>Page Not Found</h1><p>The page you're looking for doesn't exist.</p><a href="/">Return to Home</a></body></html>`);
 });
 
-// Start server
 app.listen(port, async () => {
   const photoCount = AIModelManager.getPhotoModelCount();
   const videoCount = AIModelManager.getVideoModelCount();
   const totalCount = photoCount + videoCount;
-  
+
   console.log(`🚀 Server running on port ${port}`);
   console.log(`📦 Storage: Cloudflare R2 (ZERO egress fees)`);
   console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
@@ -10174,18 +9337,15 @@ app.listen(port, async () => {
   console.log(`   → Price badges on prompts (Free/Paid)`);
   console.log(`   → Purchase verification before copying paid prompts`);
   console.log(`   → Sales and earnings tracking`);
-  
   console.log(`🎬 YOUTUBE SHORTS PLAYER:`);
   console.log(`   → Full-screen vertical video player`);
   console.log(`   → Swipe up/down navigation (mobile)`);
   console.log(`   → Arrow key navigation (desktop)`);
   console.log(`   → Like, comment, share, copy prompt functionality`);
-  
   console.log(`💬 Comment System Endpoints:`);
   console.log(`   → Get comments: http://localhost:${port}/api/prompt/:id/comments`);
   console.log(`   → Post comment: http://localhost:${port}/api/prompt/:id/comments (POST)`);
   console.log(`   → Like comment: http://localhost:${port}/api/comment/:commentId/like (POST)`);
-  
   console.log(`🔍 Search: http://localhost:${port}/api/search (Limited to 500 results)`);
   console.log(`🗺️  Sitemap: http://localhost:${port}/sitemap.xml`);
   console.log(`🤖 Robots.txt: http://localhost:${port}/robots.txt`);
@@ -10195,31 +9355,40 @@ app.listen(port, async () => {
   console.log(`   → Native Banner: aca55beb03e2d8b514ae3f122920bdf0`);
   console.log(`   → Desktop Banner (300x250): 8719e4636a7c41462203d84e956177c4`);
   console.log(`   → Mobile Banner (320x50): 37e3a123e9b664f6f0b0efed6c7ee71f`);
-  
   console.log(`📱 APP DOWNLOAD BUTTON:`);
   console.log(`   → Floating button at bottom center of prompt pages`);
   console.log(`   → Download URL: https://www.appcreator24.com/app4057785-93607p`);
-  console.log(`   → Auto-tracks download clicks`);
-  console.log(`   → Sticky while scrolling`);
-  console.log(`   → Animated with bounce effect`);
-  
   console.log(`🤖 AI MODELS ENHANCED: ${totalCount} TOTAL AI PLATFORMS SUPPORTED!`);
   console.log(`   📸 PHOTO MODELS (${photoCount})`);
   console.log(`   🎬 VIDEO MODELS (${videoCount})`);
   console.log(`💰 MARKETPLACE ACTIVE: Buy and sell prompts!`);
   console.log(`💳 PAYMENT GATEWAY: Razorpay (India)`);
-  console.log(`💰 NON-FIREBASE SERVICE CHARGES: ELIMINATED (R2 has zero egress fees)`);
   console.log(`🔗 AFFILIATE PROGRAM ACTIVE: Manage affiliate products at /affiliate.html`);
-  console.log(`   → Random 3 affiliates shown per prompt page (top, middle, bottom)`);
-  
   console.log(`🖼️ AI IMAGE GENERATOR ACTIVE (DALL-E 3 + Vision):`);
-  console.log(`   → Sticky bar on prompt pages with credit system`);
-  console.log(`   → 5 free credits per user per day`);
-  console.log(`   → Top-up: ₹20 for 50 credits via Razorpay`);
-  console.log(`   → Upload image for style reference (GPT-4 Vision)`);
-  
   console.log(`📸 INSTAGRAM BADGE:`);
-  console.log(`   → Sticky left side badge with periodic shake animation every 5 seconds`);
-  console.log(`   → Hover pauses the animation, scales up and highlights`);
-  console.log(`   → Links to https://instagram.com/toolsprompt`);
+  console.log(`💬 SOCIAL FEED + CHAT (SSE) ENABLED:`);
+  console.log(`🔔 NOTIFICATIONS ENABLED:`);
+  console.log(`🔔 PWA PUSH NOTIFICATIONS (FCM) ENABLED:`);
+  console.log(`🤖 AGNES AI VIDEO GENERATION (FREE API) ADDED!`);
+  console.log(`🎉 REFERRAL SYSTEM ENABLED:`);
+  console.log(`📺 CHANNEL SYSTEM ENABLED:`);
+  console.log(`💬 CHANNEL COMMUNITY SYSTEM ENABLED:`);
+  console.log(`   → POST /api/channel/:channelId/community (create post, owner only)`);
+  console.log(`   → GET  /api/channel/:channelId/community (list posts)`);
+  console.log(`   → DELETE /api/community/:postId (delete post, owner only)`);
+  console.log(`   → POST /api/community/:postId/react (react with emoji)`);
+  console.log(`   → GET  /api/community/:postId/comments (list comments)`);
+  console.log(`   → POST /api/community/:postId/comment (add comment)`);
+  console.log(`   → Firestore collections: community_posts, community_comments`);
+  console.log(`✏️  OWNER EDIT FEATURE ENABLED (CLIENT-SIDE OWNER CHECK):`);
+  console.log(`   → Edit button is always rendered but hidden (display:none)`);
+  console.log(`   → Client-side revealEditButtonIfOwner() unhides it when Firebase uid === data-owner-id`);
+  console.log(`   → POST /api/prompt/:id/update-content re-verifies Bearer token server-side`);
+  console.log(`   → Editable: title, image, about, platform comparison, top tools, model tips, how-to steps, expert tips, usage tips, optimization tips`);
+  console.log(`✨ NEW: PER-SECTION CUSTOMIZE-ON-UPLOAD FEATURE:`);
+  console.log(`   → Each optional section renders ONLY if the uploader filled that specific field`);
+  console.log(`   → Uploader can fill any combination of: comparison, tools, model tips, how-to, expert tips, usage tips, optimization tips`);
+  console.log(`   → Blank fields are NOT rendered (no auto-generation for blanks)`);
+  console.log(`   → Always-shown: title, image, prompt text, About description, affiliates, footer`);
+  console.log(`   → Controlled by per-section flags: showPlatformComparison, showTopTools, showModelTips, showHowTo, showExpertTips, showUsageTips, showOptimizationTips`);
 });
