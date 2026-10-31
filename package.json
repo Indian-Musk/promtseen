@@ -1,28 +1,9 @@
 {
   "dependencies": {
-    "axios": "^1.12.2",
+    "axios": "^1.21.0",
     "busboy": "^1.6.0",
-    "dotenv": "^17.2.1",
-    "express": "^5.1.0",
-    "firebase-admin": "^13.4.0"
-  },
-  "name": "promptseen-main",
-  "version": "1.0.0",
-  "main": "server.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/Indian-Musk/promptseen.git"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "bugs": {
-    "url": "https://github.com/Indian-Musk/promptseen/issues"
-  },
-  "homepage": "https://github.com/Indian-Musk/promptseen#readme",
-  "description": ""
+    "dotenv": "^18.0.9",
+    "express": "^5.3.0",
+    "firebase-admin": "^14.5.0"
+  }
 }

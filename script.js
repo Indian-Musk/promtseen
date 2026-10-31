@@ -1,12 +1,12 @@
-// Firebase Configuration
+// For Firebase JS SDK v7.20.0 and later, measurementId is optional
 const firebaseConfig = {
-  apiKey: "AIzaSyDWDn4T6tkk8ihjLX8Y_YHMkz7y2Uw9paQ",
-  authDomain: "clone-8d83d.firebaseapp.com",
-  projectId: "clone-8d83d",
-  storageBucket: "clone-8d83d.appspot.com",
-  messagingSenderId: "263963146412",
-  appId: "1:263963146412:web:c83a284115414a2c44c709",
-  measurementId: "G-C3CMBQR6GH"
+  apiKey: "AIzaSyASLUfnN4lLtI4GqE9QK3JyWjh2HeS8wsE",
+  authDomain: "promtseen-42a38.firebaseapp.com",
+  projectId: "promtseen-42a38",
+  storageBucket: "promtseen-42a38.firebasestorage.app",
+  messagingSenderId: "620714446859",
+  appId: "1:620714446859:web:019bb7a7e00248e3d6770e",
+  measurementId: "G-PW4Z50GV4H"
 };
 
 // Track Firebase initialization state
@@ -195,7 +195,7 @@ function createPromptCard(prompt) {
         <i class="fas fa-fire"></i> Viral
       </div>` : ''}
       ${!prompt.likes || prompt.likes < 100 ? `<div class="viral-badge" style="background: #20bf6b">
-        <i class="fas fa-user"></i> Prompt Seen
+        <i class="fas fa-user"></i> Promt Seen
       </div>` : ''}
     </div>
     <div class="prompt-content" itemprop="mainEntityOfPage" itemscope itemtype="https://schema.org/WebPage">

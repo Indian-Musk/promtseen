@@ -1,48 +1,72 @@
-﻿﻿﻿const express = require('express');
+﻿const express = require('express');
 const path = require('path');
-const admin = require('firebase-admin');
 const Busboy = require('busboy');
 const axios = require('axios');
 require('dotenv').config();
 
-// Initialize Firebase Admin
-try {
-  const serviceAccount = process.env.FIREBASE_ADMIN_PRIVATE_KEY ? {
-    projectId: process.env.FIREBASE_ADMIN_PROJECT_ID,
-    privateKey: process.env.FIREBASE_ADMIN_PRIVATE_KEY.replace(/\\n/g, '\n'),
-    clientEmail: process.env.FIREBASE_ADMIN_CLIENT_EMAIL
-  } : null;
+// ---------- Firebase Admin: safe, optional init ----------
+let admin;
+let firebaseAdminLoaded = false;
 
-  if (serviceAccount && serviceAccount.privateKey) {
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-      storageBucket: process.env.FIREBASE_ADMIN_STORAGE_BUCKET
-    });
-    console.log('✅ Firebase Admin initialized successfully');
-  } else {
-    console.log('⚠️ Firebase Admin not configured - running in demo mode');
-    // Create a mock admin object for development
-    admin = {
-      firestore: () => ({ collection: () => ({}) }),
-      storage: () => ({ bucket: () => ({}) }),
-      auth: () => ({ verifyIdToken: () => Promise.resolve({}) })
-    };
+try {
+  admin = require('firebase-admin');
+  // The real package always exposes credential.cert. If it doesn't, the
+  // module is corrupt/misnamed and we must not call it.
+  firebaseAdminLoaded = !!(admin && admin.credential && typeof admin.credential.cert === 'function');
+  if (!firebaseAdminLoaded) {
+    console.warn('⚠️ firebase-admin loaded but credential API is missing.');
+    console.warn('   Run: npm uninstall firebase-admin && npm install firebase-admin');
   }
-} catch (error) {
-  console.error('❌ Firebase Admin initialization failed:', error);
-  // Fallback for development
-  admin = {
-    firestore: () => ({ collection: () => ({}) }),
-    storage: () => ({ bucket: () => ({}) }),
-    auth: () => ({ verifyIdToken: () => Promise.resolve({}) })
+} catch (err) {
+  console.warn('⚠️ firebase-admin not installed:', err.message);
+  admin = null;
+}
+
+function createMockAdmin() {
+  // Firestore/storage must return falsy so the app falls back to mock data.
+  return {
+    initializeApp: () => {},
+    credential: { cert: () => ({}) },
+    firestore: () => null,
+    storage:   () => null,
+    auth:      () => ({ verifyIdToken: () => Promise.resolve({}) })
   };
+}
+
+if (firebaseAdminLoaded) {
+  try {
+    const serviceAccount = process.env.FIREBASE_ADMIN_PRIVATE_KEY ? {
+      projectId:  process.env.FIREBASE_ADMIN_PROJECT_ID,
+      privateKey: process.env.FIREBASE_ADMIN_PRIVATE_KEY.replace(/\\n/g, '\n'),
+      clientEmail: process.env.FIREBASE_ADMIN_CLIENT_EMAIL
+    } : null;
+
+    if (serviceAccount && serviceAccount.privateKey) {
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+        storageBucket: process.env.FIREBASE_ADMIN_STORAGE_BUCKET
+      });
+      console.log('✅ Firebase Admin initialized successfully');
+    } else {
+      console.log('⚠️ Firebase Admin credentials not provided - running in demo mode');
+      admin = createMockAdmin();
+    }
+  } catch (error) {
+    console.error('❌ Firebase Admin initialization failed:', error.message);
+    admin = createMockAdmin();
+  }
+} else {
+  console.log('🎭 Running in demo mode (no Firebase Admin)');
+  admin = createMockAdmin();
 }
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-const db = admin.firestore ? admin.firestore() : null;
-const bucket = admin.storage ? admin.storage().bucket() : null;
+// These are now safely null in demo mode, which the existing `if (db)` /
+// `if (bucket)` branches already handle.
+const db     = typeof admin.firestore === 'function' ? admin.firestore() : null;
+const bucket = typeof admin.storage   === 'function' ? admin.storage()?.bucket() : null;
 
 // Basic middleware
 app.use(express.json({ limit: '10mb' }));
