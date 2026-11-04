@@ -120,7 +120,7 @@ class SEOOptimizer {
       "keywords": prompt.keywords.join(', '),
       "mainEntityOfPage": {
         "@type": "WebPage",
-        "@id": `https://home.promptseen.co/prompt/${prompt.id}`
+        "@id": `https://promtseen.com/prompt/${prompt.id}`
       }
     };
   }
@@ -163,9 +163,9 @@ class SitemapGenerator {
 const mockPrompts = [
   {
     id: 'demo-1',
-    title: 'Fantasy Landscape with Mountains',
+    title: 'mountain',
     promptText: 'Create a fantasy landscape with majestic mountains, floating islands, and a mystical waterfall, digital art, highly detailed, epic composition',
-    imageUrl: 'https://via.placeholder.com/800x400/4e54c8/white?text=Fantasy+Landscape',
+    imageUrl: 'https://pub-7c47bf4b49e24e8a984db081699eedb0.r2.dev/prompts/1780064765385-a46522a4-5e26-4c7e-a2e3-68c3e235493d.png',
     userName: 'Demo User',
     likes: 42,
     views: 156,
@@ -177,18 +177,19 @@ const mockPrompts = [
   },
   {
     id: 'demo-2',
-    title: 'Cyberpunk City Street',
+    title: 'Travel ai photo prompt',
     promptText: 'Cyberpunk city street at night, neon signs, rainy pavement, futuristic vehicles, Blade Runner style, cinematic lighting',
-    imageUrl: 'https://via.placeholder.com/800x400/8f94fb/white?text=Cyberpunk+City',
+    imageUrl: 'https://pub-7c47bf4b49e24e8a984db081699eedb0.r2.dev/prompts/1780064966924-3afee6ab-5b0f-465c-991d-37e04dfd49ed.png',
     userName: 'Demo User',
     likes: 67,
     views: 289,
     uses: 45,
-    keywords: ['cyberpunk', 'city', 'neon', 'futuristic'],
+    keywords: ['travel', 'city', 'prompt', 'cinematic'],
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     seoScore: 92
   }
+
 ];
 
 // Health check endpoint
@@ -764,7 +765,7 @@ function generatePromptHTML(promptData) {
     <meta property="og:title" content="${promptData.seoTitle}">
     <meta property="og:description" content="${promptData.metaDescription}">
     <meta property="og:image" content="${promptData.imageUrl}">
-    <meta property="og:url" content="https://home.promptseen.co/prompt/${promptData.id}">
+    <meta property="og:url" content="https://promtseen.com/prompt/${promptData.id}">
     <meta property="og:type" content="article">
     
     <!-- Twitter Card -->
