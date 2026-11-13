@@ -3,11 +3,18 @@
 <head>
 <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-5992381116749724"
      crossorigin="anonymous"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'G-PW4Z50GV4H');
+</script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="title" content="Prompt Seen - New Trending Prompts & Photo editing Stock">
 <meta name="description" content="Prompt Seen Website is a Trending and viral Prompts Website Which can Help You To Make Your Photo Image In Awesome by Just Using Prompt Seen Website .">
-<meta name="keywords" content="Prompt Seen,home prompt seen,chatgpt prompt seen,midjourney prompt seen,type prompt seen,prompt seen download,prompt seen gcam,prompt seen camera,prompt seen chatgpt,prompt seen lmc,prompt seen couple,prompt seen gcam download,	prompt seen name,prompt seen ai,prompt seen app download,	prompt seen app,prompt seen apk,prompt seen attitude boy,prompt seen apk download,	prompt seen all,	prompt seen ai image generator,prompt signification,ai prompt seen,apk prompt seen download,ai couple prompt seen,	all prompt seen,prompt seen 15 august name,prompt seen 15 august photo,	prompt seen camera app,	prompt seen boy,	prompt seen birthday,prompt seen bike,prompt seen black and white,prompt seen baby,prompt seen black,prompt seen boy and girl,	prompt seen bing image creator,prompt seen bike rider,	prompt report meaning,birthday prompt seen,	best prompt seen,prompt seen ganpati bappa,prompt seen birthday wishes,prompt seen sad boy,	prompt seen name for boy,prompt seen com,prompt seen camera download,	prompt seen copy,prompt seen car,prompt seen camera iphone,prompt seen couple free,chatgpt prompt seen,couple prompt seen,prompt seen diwali,prompt seen durga puja,diwali prompt seen,prompt seen friendship day,prompt seen editing,	prompt seen eid milad un nabi,prompt seen photo editor,prompt seen rajan editz,command prompt see environment variables,anaconda prompt see environments,prompt seen name ai photo editing,	prompt scene editing,photo editing prompt seen,prompt seen free,prompt seen friends,	prompt seen free fire,prompt seen for girl,	prompt seen for chatgpt,	prompt seen for boys">
+<meta name="keywords" content="Prompt Seen,home prompt seen,chatgpt prompt seen,midjourney prompt seen,type prompt seen,prompt seen download,prompt seen gcam,prompt seen camera,prompt seen chatgpt,prompt seen lmc,prompt seen couple,prompt seen gcam download,	prompt seen name,prompt seen ai,prompt seen app download,	prompt seen app,prompt seen apk,prompt seen attitude boy,prompt seen apk download,	prompt seen all,	prompt seen ai image generator,prompt signification,ai prompt seen,apk prompt seen download,ai couple prompt seen,	all prompt seen,prompt seen 15 august name,prompt seen 15 august photo,	prompt seen camera app,	prompt seen boy,prompt seen birthday,prompt seen bike,prompt seen black and white,prompt seen baby,prompt seen black,prompt seen boy and girl,	prompt seen bing image creator,prompt seen bike rider,	prompt report meaning,birthday prompt seen,	best prompt seen,prompt seen ganpati bappa,prompt seen birthday wishes,prompt seen sad boy,	prompt seen name for boy,prompt seen com,prompt seen camera download,	prompt seen copy,prompt seen car,prompt seen camera iphone,prompt seen couple free,chatgpt prompt seen,couple prompt seen,prompt seen diwali,prompt seen durga puja,diwali prompt seen,prompt seen friendship day,prompt seen editing,	prompt seen eid milad un nabi,prompt seen photo editor,prompt seen rajan editz,command prompt see environment variables,anaconda prompt see environments,prompt seen name ai photo editing,	prompt scene editing,photo editing prompt seen,prompt seen free,prompt seen friends,	prompt seen free fire,prompt seen for girl,	prompt seen for chatgpt,	prompt seen for boys">
 <meta name="robots" content="index, follow">
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
 <meta name="language" content="English">
@@ -83,7 +90,7 @@
                 </div>
                 
                 <div class="converter-actions">
-                    <button class="convert-btn" id="convertBtn">
+                    <button class="convert-btn" id="convertBtn" type="button">
                         <i class="fas fa-bolt"></i> Enhance Prompt
                     </button>
                 </div>
@@ -202,6 +209,138 @@
     </footer>
 
     <script src="script.js"></script>
+
+    <!-- ============================================================
+         PROMPT CONVERTER - INLINE LOGIC
+         Self-contained so it works even if script.js fails to load.
+         ============================================================ -->
+    <script>
+    (function () {
+        'use strict';
+
+        function initConverter() {
+            var convertBtn     = document.getElementById('convertBtn');
+            var userPrompt     = document.getElementById('userPrompt');
+            var enhancedPrompt = document.getElementById('enhancedPrompt');
+
+            // Bail out gracefully if the DOM isn't what we expect
+            if (!convertBtn || !userPrompt || !enhancedPrompt) {
+                console.warn('PromptConverter: required elements not found.');
+                return;
+            }
+
+            function enhancePrompt(raw) {
+                var base  = String(raw).trim().replace(/[.!?]+$/, '');
+                if (!base) return '';
+                var lower = base.toLowerCase();
+                var fragments = [];
+
+                // --- Scene / subject detection ---
+                var rules = [
+                    { k: ['space','galaxy','cosmic','planet','astronaut','nebula','universe'],
+                      a: 'set against a vast cosmic backdrop with glowing nebulae, distant stars, and a sense of awe-inspiring scale' },
+                    { k: ['cat','dog','animal','bird','fox','wolf','tiger','lion','horse','rabbit','panda'],
+                      a: 'with highly detailed fur texture, expressive eyes, and natural anatomy' },
+                    { k: ['forest','tree','jungle','woods','nature','leaf','leaves'],
+                      a: 'surrounded by lush vegetation, ancient trees, and moss-covered ground' },
+                    { k: ['city','urban','street','building','cyberpunk','neon','skyline'],
+                      a: 'in a dense urban environment with layered architecture and atmospheric depth' },
+                    { k: ['portrait','face','person','man','woman','girl','boy','model','human'],
+                      a: 'with a detailed facial expression, natural skin texture, and lifelike features' },
+                    { k: ['car','bike','vehicle','motorcycle','truck','sports car'],
+                      a: 'with precise mechanical details, reflective surfaces, and a dynamic composition' },
+                    { k: ['sunset','sunrise','golden hour','dawn','dusk'],
+                      a: 'bathed in warm golden-hour light with long, dramatic shadows' },
+                    { k: ['night','dark','moon','midnight','starry'],
+                      a: 'under dramatic low-light conditions with a soft ambient glow' },
+                    { k: ['rain','storm','snow','fog','mist','wet'],
+                      a: 'with atmospheric weather effects and moody lighting' },
+                    { k: ['flower','garden','bloom','rose','floral'],
+                      a: 'with delicate petal detail, soft bokeh background, and vibrant natural colors' },
+                    { k: ['food','burger','pizza','cake','coffee','drink'],
+                      a: 'styled with appetizing lighting, rich texture, and shallow depth of field' }
+                ];
+
+                rules.forEach(function (rule) {
+                    var hit = rule.k.some(function (kw) { return lower.indexOf(kw) !== -1; });
+                    if (hit) fragments.push(rule.a);
+                });
+
+                // --- Mood detection ---
+                if (/sad|cry|lonely|melancholy|grief|emotional/.test(lower))
+                    fragments.push('with a melancholic, emotional mood');
+                if (/happy|joy|smile|celebrat|party|fun/.test(lower))
+                    fragments.push('with a joyful, uplifting atmosphere');
+                if (/epic|hero|battle|war|dramatic|cinematic/.test(lower))
+                    fragments.push('with an epic, dramatic composition');
+                if (/cute|kawaii|adorable|sweet/.test(lower))
+                    fragments.push('with an adorable, charming aesthetic');
+                if (/horror|scary|creepy|dark soul/.test(lower))
+                    fragments.push('with an eerie, unsettling atmosphere');
+
+                // Fallback if nothing matched
+                if (fragments.length === 0) {
+                    fragments.push('with intricate details, dynamic composition, and rich visual storytelling');
+                }
+
+                // --- Quality & technical suffix ---
+                var quality = 'masterpiece, ultra-detailed, 8K resolution, cinematic lighting, ' +
+                              'volumetric light, professional color grading, sharp focus, trending on ArtStation';
+
+                var isPortrait = /portrait|face|person|man|woman|girl|boy|model|human/.test(lower);
+                var ar = isPortrait ? '4:5' : '16:9';
+
+                return base.charAt(0).toUpperCase() + base.slice(1) +
+                       ', ' + fragments.join(', ') +
+                       ', ' + quality +
+                       ' --ar ' + ar + ' --v 5';
+            }
+
+            function runConversion() {
+                var base = userPrompt.value.trim();
+
+                if (!base) {
+                    enhancedPrompt.value = 'Please enter a prompt first.';
+                    return;
+                }
+
+                // Small UX feedback
+                convertBtn.disabled = true;
+                enhancedPrompt.value = 'Enhancing…';
+
+                setTimeout(function () {
+                    try {
+                        enhancedPrompt.value = enhancePrompt(base);
+                    } catch (err) {
+                        console.error('PromptConverter error:', err);
+                        enhancedPrompt.value = 'Sorry, something went wrong while enhancing your prompt.';
+                    } finally {
+                        convertBtn.disabled = false;
+                    }
+                }, 150);
+            }
+
+            convertBtn.addEventListener('click', runConversion);
+
+            // Ctrl/Cmd + Enter inside the textarea also triggers it
+            userPrompt.addEventListener('keydown', function (e) {
+                if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                    e.preventDefault();
+                    runConversion();
+                }
+            });
+        }
+
+        // Run after DOM is ready (inline script sits at end of <body>,
+        // so DOM is already parsed, but this is extra safe).
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initConverter);
+        } else {
+            initConverter();
+        }
+    })();
+    </script>
+
 <!-- Cookie Consent Banner -->
 <div id="cookie-consent" style="display: none; position: fixed; bottom: 0; left: 0; right: 0; background: rgba(45,51,74,0.95); color: white; padding: 20px; z-index: 1000;">
     <div class="container" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
