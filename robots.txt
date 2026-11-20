@@ -3,7 +3,7 @@ Allow: /
 Disallow: /admin/
 Disallow: /api/
 
-Sitemap: https://www.toolsprompt.com/sitemap.xml
-Sitemap: https://www.toolsprompt.com/sitemap-posts.xml
-Sitemap: https://www.toolsprompt.com/sitemap-news.xml
-Sitemap: https://www.toolsprompt.com/sitemap-pages.xml
+Sitemap: https://promtseen.com/sitemap.xml
+Sitemap: https://promtseen.com/sitemap-posts.xml
+Sitemap: https://promtseen.com/sitemap-news.xml
+Sitemap: https://promtseen.com/sitemap-pages.xml

@@ -2,15 +2,15 @@
 //  script.js – Complete file with channel system + share function
 // ============================================================
 
-// Firebase config
+// For Firebase JS SDK v7.20.0 and later, measurementId is optional
 const firebaseConfig = {
-  apiKey: "AIzaSyCgc0xRtijpyPhOovfwg-MzyahsUFh-hiQ",
-  authDomain: "toolsprompt-5b07e.firebaseapp.com",
-  projectId: "toolsprompt-5b07e",
-  storageBucket: "toolsprompt-5b07e.firebasestorage.app",
-  messagingSenderId: "402263780942",
-  appId: "1:402263780942:web:1013a347dbb72db6b31d1f",
-  measurementId: "G-K4KXR4FZCP"
+  apiKey: "AIzaSyASLUfnN4lLtI4GqE9QK3JyWjh2HeS8wsE",
+  authDomain: "promtseen-42a38.firebaseapp.com",
+  projectId: "promtseen-42a38",
+  storageBucket: "promtseen-42a38.firebasestorage.app",
+  messagingSenderId: "620714446859",
+  appId: "1:620714446859:web:019bb7a7e00248e3d6770e",
+  measurementId: "G-PW4Z50GV4H"
 };
 
 // Global variables
@@ -191,7 +191,7 @@ async function processPaymentWithRazorpay(prompt, customerInfo) {
             key: data.keyId,
             amount: data.amount,
             currency: data.currency,
-            name: 'Tools Prompt',
+            name: 'promt seen',
             description: `Purchase: ${prompt.title.substring(0, 40)}`,
             order_id: data.orderId,
             handler: async function(response) {
@@ -4050,7 +4050,7 @@ window.handleReuse = async function(promptId) {
 
 // ==================== INITIALIZATION ====================
 document.addEventListener('DOMContentLoaded', async () => {
-    console.log('Initializing tools prompt with marketplace features and Razorpay...');
+    console.log('Initializing promt seen with marketplace features and Razorpay...');
     await initializeFirebase();
     showAuthElements();
     await getRazorpayKey();
@@ -4077,7 +4077,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     setTimeout(() => { if (window.horizontalFeedManager) window.horizontalFeedManager.initializeAllFeeds(); }, 1500);
     setTimeout(() => addShortsFilterButton(), 2000);
     window.addEventListener('resize', initMobileHorizontalScroll);
-    console.log('tools prompt initialization complete with marketplace features and Razorpay');
+    console.log('promt seen initialization complete with marketplace features and Razorpay');
 });
 
 // Expose globals

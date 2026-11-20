@@ -398,7 +398,7 @@ app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 app.use('/api/razorpay-webhook', express.json());
 
 app.get('/ads.txt', (req, res) => {
-    const adsTxtUrl = 'https://srv.adstxtmanager.com/19390/toolsprompt.com';
+    const adsTxtUrl = 'https://srv.adstxtmanager.com/19390/promtseen.com';
     console.log(`🔄 Redirecting /ads.txt to ${adsTxtUrl}`);
     res.redirect(301, adsTxtUrl);
 });
@@ -548,7 +548,7 @@ const aiGeneratorCSS = `
     transition: transform 0.3s ease;
     flex-wrap: nowrap;
 }
-.ai-generator-bar.active { display: flex; }
+.ai-generator-bar.active { display: none !important; }
 .ai-generator-input {
     flex: 1 1 auto; min-width: 60px; max-height: 80px;
     padding: 8px 12px; border: 2px solid #e9ecef; border-radius: 24px;
@@ -1460,7 +1460,7 @@ async function migrateExistingPromptsForAdSense() {
 class SEOOptimizer {
   static generateSEOTitle(promptTitle) {
     const keywords = this.extractKeywords(promptTitle);
-    const baseTitle = `AI Prompt: ${promptTitle} - tools prompt`;
+    const baseTitle = `AI Prompt: ${promptTitle} - promt seen`;
     return keywords.length > 0 ? `${keywords.slice(0, 3).join(', ')} | ${baseTitle}` : baseTitle;
   }
   static generateMetaDescription(promptText, title) {
@@ -1484,10 +1484,10 @@ class SEOOptimizer {
       "name": prompt.title || 'Untitled Prompt',
       "description": prompt.metaDescription || 'AI-generated prompt',
       "image": prompt.imageUrl || 'https://via.placeholder.com/800x400/4e54c8/white?text=AI+Image',
-      "author": { "@type": "Person", "name": prompt.userName || "tools prompt User" },
+      "author": { "@type": "Person", "name": prompt.userName || "promt seen User" },
       "datePublished": prompt.createdAt || new Date().toISOString(),
       "keywords": (prompt.keywords || ['AI', 'prompt']).join(', '),
-      "mainEntityOfPage": { "@type": "WebPage", "@id": `https://www.toolsprompt.com/prompt/${prompt.id || 'unknown'}` }
+      "mainEntityOfPage": { "@type": "WebPage", "@id": `https://www.promtseen.com/prompt/${prompt.id || 'unknown'}` }
     };
   }
 }
@@ -2273,9 +2273,9 @@ class EngagementAnalytics {
 }
 
 class NewsSEOOptimizer {
-  static generateNewsTitle(title) { return `${title || 'AI News'} - tools prompt News`; }
+  static generateNewsTitle(title) { return `${title || 'AI News'} - promt seen News`; }
   static generateNewsDescription(content) {
-    if (!content) return 'Latest AI news and updates from tools prompt.';
+    if (!content) return 'Latest AI news and updates from promt seen.';
     const cleanContent = content.replace(/[^\w\s]/gi, ' ').substring(0, 150);
     return `${cleanContent}... Read more AI prompt news and updates.`;
   }
@@ -2289,16 +2289,16 @@ class NewsSEOOptimizer {
       "@type": "NewsArticle",
       "headline": news.title || 'AI News',
       "description": news.metaDescription || 'Latest AI news and updates',
-      "image": news.imageUrl || 'https://www.toolsprompt.com/logo.png',
+      "image": news.imageUrl || 'https://www.promtseen.com/logo.png',
       "datePublished": news.createdAt || new Date().toISOString(),
       "dateModified": news.updatedAt || new Date().toISOString(),
-      "author": { "@type": "Person", "name": news.author || "tools prompt Editor" },
+      "author": { "@type": "Person", "name": news.author || "promt seen Editor" },
       "publisher": {
         "@type": "Organization",
-        "name": "tools prompt",
-        "logo": { "@type": "ImageObject", "url": "https://www.toolsprompt.com/logo.png" }
+        "name": "promt seen",
+        "logo": { "@type": "ImageObject", "url": "https://www.promtseen.com/logo.png" }
       },
-      "mainEntityOfPage": { "@type": "WebPage", "@id": `https://www.toolsprompt.com/news/${news.id || 'unknown'}` }
+      "mainEntityOfPage": { "@type": "WebPage", "@id": `https://www.promtseen.com/news/${news.id || 'unknown'}` }
     };
   }
 }
@@ -2321,7 +2321,7 @@ class SitemapGenerator {
     let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
     xml += `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"\n        xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">\n`;
     newsUrls.forEach(url => {
-      xml += `<url>\n  <loc>${this.escapeXml(url.loc)}</loc>\n  <news:news>\n    <news:publication>\n      <news:name>tools prompt</news:name>\n      <news:language>en</news:language>\n    </news:publication>\n    <news:publication_date>${new Date(url.lastmod).toISOString().split('T')[0]}</news:publication_date>\n    <news:title>${this.escapeXml(url.title || 'AI News')}</news:title>\n  </news:news>\n</url>\n`;
+      xml += `<url>\n  <loc>${this.escapeXml(url.loc)}</loc>\n  <news:news>\n    <news:publication>\n      <news:name>promt seen</news:name>\n      <news:language>en</news:language>\n    </news:publication>\n    <news:publication_date>${new Date(url.lastmod).toISOString().split('T')[0]}</news:publication_date>\n    <news:title>${this.escapeXml(url.title || 'AI News')}</news:title>\n  </news:news>\n</url>\n`;
     });
     xml += `</urlset>`;
     return xml;
@@ -3036,7 +3036,7 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'OK',
     timestamp: new Date().toISOString(),
-    service: 'tools prompt API',
+    service: 'promt seen API',
     mode: db ? 'production' : 'development',
     storage: 'Cloudflare R2 (zero egress)',
     cacheStats: cache.getStats(),
@@ -3103,18 +3103,18 @@ app.get('/robots.txt', (req, res) => {
   let protocol = 'https';
   if (req.secure) protocol = 'https';
   else if (req.headers['x-forwarded-proto'] === 'https') protocol = 'https';
-  else if (domain.includes('toolsprompt.com')) protocol = 'https';
+  else if (domain.includes('promtseen.com')) protocol = 'https';
   else protocol = req.protocol;
   const robotsTxt = `User-agent: *
 Allow: /
 Disallow: /admin/
 Disallow: /api/
 
-Sitemap: https://www.toolsprompt.com/sitemap.xml
-Sitemap: https://www.toolsprompt.com/sitemap-posts.xml
-Sitemap: https://www.toolsprompt.com/sitemap-news.xml
-Sitemap: https://www.toolsprompt.com/sitemap-channels.xml
-Sitemap: https://www.toolsprompt.com/sitemap-pages.xml`;
+Sitemap: https://www.promtseen.com/sitemap.xml
+Sitemap: https://www.promtseen.com/sitemap-posts.xml
+Sitemap: https://www.promtseen.com/sitemap-news.xml
+Sitemap: https://www.promtseen.com/sitemap-channels.xml
+Sitemap: https://www.promtseen.com/sitemap-pages.xml`;
   res.set('Content-Type', 'text/plain');
   res.set('Cache-Control', 'public, max-age=3600');
   res.send(robotsTxt);
@@ -3817,7 +3817,7 @@ app.get('/api/blog-posts', (req, res) => {
             const dateMatch = content.match(/<meta name="date" content="(.*?)">/);
             const date = dateMatch ? dateMatch[1] : stats.birthtime.toISOString().split('T')[0];
             const authorMatch = content.match(/<meta name="author" content="(.*?)">/);
-            const author = authorMatch ? authorMatch[1] : 'Tools Prompt';
+            const author = authorMatch ? authorMatch[1] : 'promt seen';
             const categoryMatch = content.match(/<meta name="category" content="(.*?)">/);
             const category = categoryMatch ? categoryMatch[1] : 'General';
             const excerptMatch = content.match(/<p>(.*?)<\/p>/);
@@ -4705,9 +4705,9 @@ async function sendPushNotification(userId, title, body, data = {}) {
   if (!adminInitialized) { console.log('Firebase Admin not initialized, cannot send push'); return; }
   try {
     const message = {
-      notification: { title, body, icon: 'https://www.toolsprompt.com/logo.png', badge: 'https://www.toolsprompt.com/logo.png' },
+      notification: { title, body, icon: 'https://www.promtseen.com/logo.png', badge: 'https://www.promtseen.com/logo.png' },
       data, token,
-      webpush: { fcm_options: { link: data.link || 'https://www.toolsprompt.com/' } }
+      webpush: { fcm_options: { link: data.link || 'https://www.promtseen.com/' } }
     };
     const response = await admin.messaging().send(message);
     console.log(`✅ Push notification sent to ${userId}: ${response}`);
@@ -4733,7 +4733,7 @@ async function sendPushToAllUsers(title, body, data = {}) {
     if (admin.messaging) {
       const messages = tokens.map(({ token }) => ({
         notification: { title, body }, data, token,
-        webpush: { fcm_options: { link: data.link || 'https://www.toolsprompt.com/' } }
+        webpush: { fcm_options: { link: data.link || 'https://www.promtseen.com/' } }
       }));
       for (let i = 0; i < messages.length; i += 500) {
         const chunk = messages.slice(i, i + 500);
@@ -4827,7 +4827,7 @@ app.get('/api/referral-link', async (req, res) => {
     res.json({
       success: true,
       referralCode: code,
-      referralLink: `${process.env.BASE_URL || 'https://www.toolsprompt.com'}/login.html?ref=${code}`,
+      referralLink: `${process.env.BASE_URL || 'https://www.promtseen.com'}/login.html?ref=${code}`,
       referralCount: data?.referralCount || 0,
       credits: credits.credits
     });
@@ -4846,7 +4846,7 @@ function createNewsData(news, id) {
     content: safeNews.content || 'No content available.',
     excerpt: safeNews.excerpt || (safeNews.content ? safeNews.content.substring(0, 200) + '...' : ''),
     imageUrl: safeNews.imageUrl || 'https://via.placeholder.com/800x400/4e54c8/white?text=Prompt+Seen+News',
-    author: safeNews.author || 'tools prompt Editor',
+    author: safeNews.author || 'promt seen Editor',
     category: safeNews.category || 'ai-news',
     tags: safeNews.tags || ['ai', 'news'],
     views: safeNews.views || 0,
@@ -4856,8 +4856,8 @@ function createNewsData(news, id) {
     isFeatured: safeNews.isFeatured || false,
     createdAt: safeDateToString(safeNews.createdAt),
     publishedAt: safeDateToString(safeNews.publishedAt),
-    seoTitle: safeNews.seoTitle || safeNews.title || 'AI News - tools prompt',
-    metaDescription: safeNews.metaDescription || (safeNews.content ? safeNews.content.substring(0, 155) + '...' : 'Latest AI news and prompt engineering updates from tools prompt.')
+    seoTitle: safeNews.seoTitle || safeNews.title || 'AI News - promt seen',
+    metaDescription: safeNews.metaDescription || (safeNews.content ? safeNews.content.substring(0, 155) + '...' : 'Latest AI news and prompt engineering updates from promt seen.')
   };
 }
 
@@ -4884,7 +4884,7 @@ function createPromptData(prompt, id, hasPurchased = false) {
   const promptData = {
     id: id || 'unknown',
     title: safePrompt.title || 'Untitled Prompt',
-    seoTitle: safePrompt.seoTitle || safePrompt.title || (isVideo ? 'AI Video Prompt - tools prompt' : 'AI Prompt - tools prompt'),
+    seoTitle: safePrompt.seoTitle || safePrompt.title || (isVideo ? 'AI Video Prompt - promt seen' : 'AI Prompt - promt seen'),
     metaDescription: safePrompt.metaDescription || (safePrompt.promptText ?
       safePrompt.promptText.substring(0, 155) + '...' :
       (isVideo ? 'Explore this AI-generated video and learn prompt engineering techniques.' : 'Explore this AI-generated content and learn prompt engineering techniques.')),
@@ -5886,7 +5886,7 @@ function generateChannelHTML(channel, channelId, prompts, isSubscribed, currentU
     const avatarUrl = channel.avatarUrl || 'https://via.placeholder.com/100x100/4e54c8/ffffff?text=' + encodeURIComponent(channel.channelName?.charAt(0) || 'C');
     const bannerUrl = channel.bannerUrl || 'https://via.placeholder.com/1200x300/2d334a/ffffff?text=' + encodeURIComponent(channel.channelName || 'Channel');
     const description = channel.description || `Channel of ${channel.channelName || 'Channel'} - AI prompts and creations.`;
-    const title = `${channel.channelName || 'Channel'} - tools prompt Channel`;
+    const title = `${channel.channelName || 'Channel'} - promt seen Channel`;
     const subscriberCount = channel.subscribers || 0;
     const totalSupport = channel.totalSupport || 0;
     const totalSupportCount = channel.totalSupportCount || 0;
@@ -5934,16 +5934,16 @@ function generateChannelHTML(channel, channelId, prompts, isSubscribed, currentU
         "name": channel.channelName || "Channel",
         "description": (channel.description || `Channel of ${channel.channelName || 'Channel'}`)
             .replace(/\r\n/g, ' ').replace(/\s+/g, ' ').trim(),
-        "url": canonicalUrl || `https://www.toolsprompt.com/channel/${channelId}`,
+        "url": canonicalUrl || `https://www.promtseen.com/channel/${channelId}`,
         "mainEntity": {
             "@type": "Person",
-            "@id": (canonicalUrl || `https://www.toolsprompt.com/channel/${channelId}`) + "#person",
+            "@id": (canonicalUrl || `https://www.promtseen.com/channel/${channelId}`) + "#person",
             "name": channel.channelName || "Channel Owner",
             "identifier": channel.channelHandle || channel.channelName || channelId,
-            "image": channel.avatarUrl || "https://www.toolsprompt.com/logo.png",
+            "image": channel.avatarUrl || "https://www.promtseen.com/logo.png",
             "description": (channel.description || `Channel of ${channel.channelName || 'Channel'}`)
                 .replace(/\r\n/g, ' ').replace(/\s+/g, ' ').trim(),
-            "url": canonicalUrl || `https://www.toolsprompt.com/channel/${channelId}`,
+            "url": canonicalUrl || `https://www.promtseen.com/channel/${channelId}`,
             "interactionStatistic": [
                 {
                     "@type": "InteractionCounter",
@@ -5963,7 +5963,7 @@ function generateChannelHTML(channel, channelId, prompts, isSubscribed, currentU
     const structuredDataJSON = JSON.stringify(structuredData);
 
     return `<!DOCTYPE html>
-<html lang="en" itemscope itemtype="https://schema.org/ProfilePage">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -5976,7 +5976,7 @@ function generateChannelHTML(channel, channelId, prompts, isSubscribed, currentU
     <meta property="og:image" content="${avatarUrl}">
     <meta property="og:url" content="${canonicalUrl}">
     <meta property="og:type" content="profile">
-    <meta property="og:site_name" content="tools prompt">
+    <meta property="og:site_name" content="promt seen">
     <meta property="profile:username" content="${channel.channelHandle || channel.channelName || 'channel'}">
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="${title}">
@@ -6297,8 +6297,8 @@ ${structuredDataJSON}
     <header style="background: white; padding: 10px 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); position: sticky; top: 0; z-index: 100;">
         <div style="max-width: 1200px; margin: 0 auto; display: flex; justify-content: space-between; align-items: center;">
            <a href="/" style="display: flex; align-items: center; gap: 10px; text-decoration: none; color: #4e54c8; font-weight: 700; font-size: 1.2rem;">
-    <img src="/logo.png" alt="Tools Prompt Logo" style="height: 40px; width: auto; border-radius: 8px;" onerror="this.style.display='none'; this.nextElementSibling.style.display='inline';">
-    <span >Tools Prompt</span>
+    <img src="/logo.png" alt="promt seen Logo" style="height: 40px; width: auto; border-radius: 8px;" onerror="this.style.display='none'; this.nextElementSibling.style.display='inline';">
+    <span >promt seen</span>
 </a>
             <div style="display: flex; gap: 15px; align-items: center;">
                 <a href="/" style="color: #333; text-decoration: none;">Home</a>
@@ -6476,9 +6476,9 @@ ${structuredDataJSON}
     <script>
         const firebaseConfig = {
             apiKey: "AIzaSyCgc0xRtijpyPhOovfwg-MzyahsUFh-hiQ",
-            authDomain: "toolsprompt-5b07e.firebaseapp.com",
-            projectId: "toolsprompt-5b07e",
-            storageBucket: "toolsprompt-5b07e.firebasestorage.app",
+            authDomain: "promtseen-5b07e.firebaseapp.com",
+            projectId: "promtseen-5b07e",
+            storageBucket: "promtseen-5b07e.firebasestorage.app",
             messagingSenderId: "402263780942",
             appId: "1:402263780942:web:1013a347dbb72db6b31d1f",
             measurementId: "G-K4KXR4FZCP"
@@ -7237,7 +7237,7 @@ app.get('/channel/:identifier', async (req, res) => {
 // ==================== ENHANCED PROMPT PAGE GENERATOR ====================
 function generateEnhancedPromptHTML(promptData, affiliates, creatorChannel = null) {
   const prompt = promptData;
-  const baseUrl = 'https://www.toolsprompt.com';
+  const baseUrl = 'https://www.promtseen.com';
   const promptUrl = baseUrl + '/prompt/' + promptData.id;
   const gaId = process.env.GOOGLE_ANALYTICS_ID || 'G-K4KXR4FZCP';
   const isVideo = promptData.fileType === 'video' || promptData.videoUrl || promptData.category === 'video';
@@ -7292,8 +7292,8 @@ function generateEnhancedPromptHTML(promptData, affiliates, creatorChannel = nul
   const socialBadgesHTML = `
 <div class="social-badges-container" id="socialBadgesContainer">
     <button class="social-badges-toggle" id="socialToggleBtn" aria-label="Toggle social badges"><i class="fas fa-chevron-up"></i></button>
-    <a href="https://instagram.com/toolsprompt" target="_blank" class="social-badge instagram-badge" rel="noopener noreferrer"><i class="fab fa-instagram"></i><span class="followers-text">Follow on Insta</span></a>
-    <a href="https://youtube.com/@toolsprompt" target="_blank" class="social-badge youtube-badge" rel="noopener noreferrer"><i class="fab fa-youtube"></i><span class="followers-text">Subscribe On YT</span></a>
+    <a href="https://instagram.com/promtseen" target="_blank" class="social-badge instagram-badge" rel="noopener noreferrer"><i class="fab fa-instagram"></i><span class="followers-text">Follow on Insta</span></a>
+    <a href="https://youtube.com/@promtseen" target="_blank" class="social-badge youtube-badge" rel="noopener noreferrer"><i class="fab fa-youtube"></i><span class="followers-text">Subscribe On YT</span></a>
     <a href="https://wa.me/yourwhatsappnumber" target="_blank" class="social-badge whatsapp-badge" rel="noopener noreferrer"><i class="fab fa-whatsapp"></i><span class="followers-text">Join Whatsapp</span></a>
 </div>
 `;
@@ -7708,7 +7708,7 @@ setTimeout(() => {
                 }
                 const options = {
                     key: data.keyId, amount: data.amount, currency: data.currency,
-                    name: 'Tools Prompt', description: 'Top-up 50 credits', order_id: data.orderId,
+                    name: 'promt seen', description: 'Top-up 50 credits', order_id: data.orderId,
                     handler: async function(response) {
                         try {
                             const verifyRes = await fetch('/api/verify-topup', {
@@ -7866,7 +7866,7 @@ async function requestNotificationPermission() {
 function showBrowserNotification(title, body, data) {
     if (!notificationPermissionGranted) return;
     try {
-        const options = { body: body || '', icon: 'https://www.toolsprompt.com/logo.png', badge: 'https://www.toolsprompt.com/logo.png', data: data || {}, requireInteraction: false };
+        const options = { body: body || '', icon: 'https://www.promtseen.com/logo.png', badge: 'https://www.promtseen.com/logo.png', data: data || {}, requireInteraction: false };
         const notification = new Notification(title, options);
         notification.onclick = function(event) {
             event.preventDefault();
@@ -8404,7 +8404,7 @@ if (typeof firebase !== 'undefined' && firebase.auth) {
     <meta property="og:url" content="${promptUrl}">
     <meta property="og:type" content="${isVideo ? 'video.other' : 'article'}">
     ${isVideo ? `<meta property="og:video" content="${promptData.videoUrl || promptData.mediaUrl}">` : ''}
-    <meta property="og:site_name" content="tools prompt">
+    <meta property="og:site_name" content="promt seen">
     <meta name="twitter:card" content="${isVideo ? 'player' : 'summary_large_image'}">
     <meta name="twitter:title" content="${promptData.seoTitle}">
     <meta name="twitter:description" content="${promptData.metaDescription}">
@@ -8414,11 +8414,28 @@ if (typeof firebase !== 'undefined' && firebase.auth) {
     <script type="application/ld+json">
     {
       "@context": "https://schema.org",
-      "@type": "${isVideo ? 'VideoObject' : 'HowTo'}",
-      "name": "How to Use: ${promptData.title.replace(/"/g, '\\"')}",
+      "@type": "Article",
+      "headline": "${promptData.title.replace(/"/g, '\\"')}",
       "description": "${promptData.metaDescription.replace(/"/g, '\\"')}",
-      ${isVideo ? `"thumbnailUrl": "${promptData.imageUrl}", "contentUrl": "${promptData.videoUrl || promptData.mediaUrl}", "uploadDate": "${promptData.createdAt}", "duration": "PT${promptData.videoDuration || 10}S",` : `"image": "${promptData.imageUrl}", "totalTime": "PT5M", "estimatedCost": { "@type": "MonetaryAmount", "currency": "USD", "value": "0" },`}
-      "step": [${(promptData.stepByStepInstructions || []).map((step, index) => `{ "@type": "HowToStep", "position": ${index + 1}, "name": "Step ${index + 1}", "text": "${step.replace(/"/g, '\\"')}" }`).join(',')}]
+      "image": ["${promptData.imageUrl}"],
+      "datePublished": "${promptData.createdAt}",
+      "dateModified": "${promptData.updatedAt}",
+      "author": {
+        "@type": "Person",
+        "name": "${promptData.userName || 'promtseen Creator'}"
+      },
+      "publisher": {
+        "@type": "Organization",
+        "name": "promtseen",
+        "logo": {
+          "@type": "ImageObject",
+          "url": "https://www.promtseen.com/logo.png"
+        }
+      },
+      "mainEntityOfPage": {
+        "@type": "WebPage",
+        "@id": "${promptUrl}"
+      }
     }
     </script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
@@ -8600,17 +8617,17 @@ if (typeof firebase !== 'undefined' && firebase.auth) {
 <body>
     <header class="site-header">
         <div class="header-container">
-            <a href="https://www.toolsprompt.com" class="logo">
-                <img src="https://www.toolsprompt.com/logo.png" alt="tools prompt Logo">
-                <span>Tools prompt</span>
+            <a href="https://www.promtseen.com" class="logo">
+                <img src="https://www.promtseen.com/logo.png" alt="promt seen Logo">
+                <span>promt seen</span>
             </a>
             <nav>
                 <ul class="nav-links">
-                    <li><a href="https://www.toolsprompt.com/">Home</a></li>
-                    <li><a href="https://www.toolsprompt.com/#promptsContainer">Browse</a></li>
-                    <li><a href="https://www.toolsprompt.com/news.html">News</a></li>
-                    <li><a href="https://www.toolsprompt.com/ai-detector.html">Tools</a></li>
-                    <li><a href="https://www.toolsprompt.com/dashboard.html">Dashboard</a></li>
+                    <li><a href="https://www.promtseen.com/">Home</a></li>
+                    <li><a href="https://www.promtseen.com/#promptsContainer">Browse</a></li>
+                    <li><a href="https://www.promtseen.com/news.html">News</a></li>
+                    <li><a href="https://www.promtseen.com/ai-detector.html">Tools</a></li>
+                    <li><a href="https://www.promtseen.com/dashboard.html">Dashboard</a></li>
                 </ul>
             </nav>
             <div class="auth-section" id="authSection">
@@ -8627,7 +8644,7 @@ if (typeof firebase !== 'undefined' && firebase.auth) {
                     <span>Created by: ${displayCreator}</span>
                     ${platformBadge}
                     ${priceBadge}
-                    ${promptData.seoScore ? '<span style="background: #20bf6b; color: white; padding: 4px 8px; border-radius: 12px; font-size: 0.8rem; font-weight: 600; margin-left: 10px;">tools prompt: ' + promptData.seoScore + '/100</span>' : ''}
+                    ${promptData.seoScore ? '<span style="background: #20bf6b; color: white; padding: 4px 8px; border-radius: 12px; font-size: 0.8rem; font-weight: 600; margin-left: 10px;">Promtseen: ' + promptData.seoScore + '/100</span>' : ''}
                     ${isVideo && promptData.hasCustomThumbnail ? '<span style="background: #20bf6b; color: white; padding: 4px 8px; border-radius: 12px; font-size: 0.8rem; font-weight: 600; margin-left: 10px;"><i class="fas fa-image"></i> Custom Thumbnail</span>' : ''}
                 </div>
                 <h1 class="article-title">${promptData.title}</h1>
@@ -8735,11 +8752,11 @@ if (typeof firebase !== 'undefined' && firebase.auth) {
                 ` : ''}
 
                 <div class="engagement-buttons">
-                    <button class="engagement-btn" onclick="toggleMiniBrowser()" title="Open tools prompt Browser (Ctrl+B)"><i class="fas fa-external-link-alt"></i> Quick Browse</button>
+                    <button class="engagement-btn" onclick="toggleMiniBrowser()" title="Open promt seen Browser (Ctrl+B)"><i class="fas fa-external-link-alt"></i> Quick Browse</button>
                     <button class="engagement-btn like-btn" onclick="handleLike('${promptData.id}')"><i class="far fa-heart"></i> Like Prompt</button>
                     <button class="engagement-btn reuse-btn" onclick="handleReuse('${promptData.id}')"><i class="fas fa-redo"></i> Reuse Prompt</button>
                     <button class="engagement-btn share-btn" onclick="handleShare('${promptData.id}')"><i class="fas fa-share"></i> Share Prompt</button>
-                    <a href="https://www.toolsprompt.com/" class="engagement-btn"><i class="fas fa-home"></i> More Prompts</a>
+                    <a href="https://www.promtseen.com/" class="engagement-btn"><i class="fas fa-home"></i> More Prompts</a>
                 </div>
             </div>
 
@@ -8791,30 +8808,30 @@ if (typeof firebase !== 'undefined' && firebase.auth) {
     <footer class="site-footer">
         <div class="footer-container">
             <div class="footer-section">
-                <h3>tools prompt</h3>
-                <p>Toolsprompt is the leading AI Prompt Marketplace where you can buy and sell viral AI prompts for photo editing, video creation, and other creative tasks. Join thousands of prompt engineers and start earning today!.</p>
+                <h3>promt seen</h3>
+                <p>promtseen is the leading AI Prompt Marketplace where you can buy and sell viral AI prompts for photo editing, video creation, and other creative tasks. Join thousands of prompt engineers and start earning today!.</p>
             </div>
             <div class="footer-section">
                 <h3>Quick Links</h3>
                 <ul class="footer-links">
-                    <li><a href="https://www.toolsprompt.com/">Home</a></li>
-                    <li><a href="https://www.toolsprompt.com/#promptsContainer">Browse Prompts</a></li>
-                    <li><a href="https://www.toolsprompt.com/news.html">AI News</a></li>
-                    <li><a href="https://www.toolsprompt.com/ai-detector.html">Prompt Tools</a></li>
-                    <li><a href="https://www.toolsprompt.com/dashboard.html">Dashboard</a></li>
+                    <li><a href="https://www.promtseen.com/">Home</a></li>
+                    <li><a href="https://www.promtseen.com/#promptsContainer">Browse Prompts</a></li>
+                    <li><a href="https://www.promtseen.com/news.html">AI News</a></li>
+                    <li><a href="https://www.promtseen.com/ai-detector.html">Prompt Tools</a></li>
+                    <li><a href="https://www.promtseen.com/dashboard.html">Dashboard</a></li>
                 </ul>
             </div>
             <div class="footer-section">
                 <h3>Resources</h3>
                 <ul class="footer-links">
-                    <li><a href="https://www.toolsprompt.com/howitworks.html">How It Works</a></li>
+                    <li><a href="https://www.promtseen.com/howitworks.html">How It Works</a></li>
                     <li><a href="/sitemap.xml">Sitemap</a></li>
                     <li><a href="/robots.txt">Robots.txt</a></li>
                     <li><a href="/affiliate.html">Affiliate Manager (Admin)</a></li>
                 </ul>
             </div>
         </div>
-        <div class="copyright"><p>&copy; 2026 toolsprompt.com All rights reserved. | AI Prompt Marketplace - Buy and Sell AI Prompts</p></div>
+        <div class="copyright"><p>&copy; 2026 promtseen.com All rights reserved. | AI Prompt Marketplace - Buy and Sell AI Prompts</p></div>
     </footer>
 
    
@@ -8827,9 +8844,9 @@ if (typeof firebase !== 'undefined' && firebase.auth) {
 <script>
     var firebaseConfig = {
         apiKey: "AIzaSyCgc0xRtijpyPhOovfwg-MzyahsUFh-hiQ",
-        authDomain: "toolsprompt-5b07e.firebaseapp.com",
-        projectId: "toolsprompt-5b07e",
-        storageBucket: "toolsprompt-5b07e.firebasestorage.app",
+        authDomain: "promtseen-5b07e.firebaseapp.com",
+        projectId: "promtseen-5b07e",
+        storageBucket: "promtseen-5b07e.firebasestorage.app",
         messagingSenderId: "402263780942",
         appId: "1:402263780942:web:1013a347dbb72db6b31d1f",
         measurementId: "G-K4KXR4FZCP"
@@ -9054,7 +9071,7 @@ document.addEventListener('DOMContentLoaded', function() {
             }
             var options = {
                 key: data.keyId, amount: data.amount, currency: data.currency || 'INR',
-                name: 'Tools Prompt', description: 'Purchase: ' + (prompt.title || 'Prompt'),
+                name: 'promt seen', description: 'Purchase: ' + (prompt.title || 'Prompt'),
                 order_id: data.orderId,
                 handler: async function(response) {
                     buyBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Verifying...';
@@ -9205,7 +9222,7 @@ function generateCategoryHTML(category, baseUrl) {
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>${categoryName} Prompts - tools prompt</title>
+    <title>${categoryName} Prompts - promt seen</title>
     <meta name="description" content="${description}">
     ${generateAdSenseCode()}
     <style>
@@ -9227,10 +9244,34 @@ function generateCategoryHTML(category, baseUrl) {
 
 function generateNewsHTML(newsData) {
   const adsenseCode = generateAdSenseCode();
-  const baseUrl = process.env.NODE_ENV === 'production' ? 'https://www.toolsprompt.com' : '';
+  const baseUrl = process.env.NODE_ENV === 'production' ? 'https://www.promtseen.com' : '';
   const newsUrl = baseUrl + '/news/' + newsData.id;
   const tagsHTML = (newsData.tags || []).map(tag => '<meta property="article:tag" content="' + tag + '">').join('');
   const contentHTML = (newsData.content || '').split('\n').map(paragraph => '<p>' + paragraph + '</p>').join('');
+  
+  // Added JSON-LD NewsArticle schema for better Google Discover compatibility
+  const structuredData = {
+    "@context": "https://schema.org",
+    "@type": "NewsArticle",
+    "headline": newsData.title.replace(/"/g, '\\"'),
+    "description": newsData.metaDescription.replace(/"/g, '\\"'),
+    "image": [newsData.imageUrl],
+    "datePublished": newsData.publishedAt,
+    "dateModified": newsData.updatedAt || newsData.publishedAt,
+    "author": {
+      "@type": "Person",
+      "name": newsData.author.replace(/"/g, '\\"')
+    },
+    "publisher": {
+      "@type": "Organization",
+      "name": "promtseen",
+      "logo": {
+        "@type": "ImageObject",
+        "url": "https://www.promtseen.com/logo.png"
+      }
+    }
+  };
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -9238,6 +9279,8 @@ function generateNewsHTML(newsData) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>${newsData.seoTitle}</title>
     <meta name="description" content="${newsData.metaDescription}">
+    <!-- Added max-image-preview for Google Discover -->
+    <meta name="robots" content="index, follow, max-image-preview:large">
     ${adsenseCode}
     <meta property="og:type" content="article">
     <meta property="og:url" content="${newsUrl}">
@@ -9248,6 +9291,9 @@ function generateNewsHTML(newsData) {
     ${tagsHTML}
     <link rel="canonical" href="${newsUrl}" />
     <meta name="news_keywords" content="${(newsData.tags || []).join(', ')}">
+    <script type="application/ld+json">
+      ${JSON.stringify(structuredData)}
+    </script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: 'Segoe UI', sans-serif; line-height: 1.6; color: #333; background: #f5f7fa; padding: 20px; }
@@ -9280,13 +9326,13 @@ function generateNewsHTML(newsData) {
         <div class="ad-container"><div class="ad-label">Advertisement</div></div>
         <div class="news-content">${contentHTML}</div>
         <div class="ad-container"><div class="ad-label">Advertisement</div></div>
-        <a href="/" class="back-link">← Back to tools prompt</a>
+        <a href="/" class="back-link">← Back to promt seen</a>
     </article>
     <script>
         (function() {
             var currentHost = window.location.hostname;
-            if (currentHost === 'toolsprompt.com') {
-                var targetUrl = 'https://www.toolsprompt.com' + window.location.pathname + window.location.search + window.location.hash;
+            if (currentHost === 'promtseen.com') {
+                var targetUrl = 'https://www.promtseen.com' + window.location.pathname + window.location.search + window.location.hash;
                 if (window.location.href !== targetUrl) window.location.replace(targetUrl);
             }
         })();
@@ -9296,19 +9342,19 @@ function generateNewsHTML(newsData) {
 }
 
 function sendPromptNotFound(res, promptId) {
-  res.status(404).send(`<!DOCTYPE html><html><head><title>Prompt Not Found - tools prompt</title></head><body><h1>Prompt Not Found</h1><p>The prompt you're looking for doesn't exist.</p><a href="/">Return Home</a></body></html>`);
+  res.status(404).send(`<!DOCTYPE html><html><head><title>Prompt Not Found - promt seen</title></head><body><h1>Prompt Not Found</h1><p>The prompt you're looking for doesn't exist.</p><a href="/">Return Home</a></body></html>`);
 }
 
 function sendNewsNotFound(res, newsId) {
-  res.status(404).send(`<!DOCTYPE html><html><head><title>News Not Found - tools prompt</title></head><body><h1>News Not Found</h1><p>The news article you're looking for doesn't exist.</p><a href="/">Return Home</a></body></html>`);
+  res.status(404).send(`<!DOCTYPE html><html><head><title>News Not Found - promt seen</title></head><body><h1>News Not Found</h1><p>The news article you're looking for doesn't exist.</p><a href="/">Return Home</a></body></html>`);
 }
 
 function sendErrorPage(res, error) {
-  res.status(500).send(`<!DOCTYPE html><html><head><title>Error - tools prompt</title></head><body><h1>Error Loading Page</h1><p>There was an error loading this page. Please try again later.</p><a href="/">Return Home</a></body></html>`);
+  res.status(500).send(`<!DOCTYPE html><html><head><title>Error - promt seen</title></head><body><h1>Error Loading Page</h1><p>There was an error loading this page. Please try again later.</p><a href="/">Return Home</a></body></html>`);
 }
 
 function sendNewsErrorPage(res, error) {
-  res.status(500).send(`<!DOCTYPE html><html><head><title>Error - tools prompt News</title></head><body><h1>Error Loading News</h1><p>There was an error loading this news article. Please try again later.</p><a href="/">Return Home</a></body></html>`);
+  res.status(500).send(`<!DOCTYPE html><html><head><title>Error - promt seen News</title></head><body><h1>Error Loading News</h1><p>There was an error loading this news article. Please try again later.</p><a href="/">Return Home</a></body></html>`);
 }
 
 app.use((req, res) => {

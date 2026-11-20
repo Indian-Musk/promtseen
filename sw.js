@@ -4,16 +4,16 @@
 importScripts('https://www.gstatic.com/firebasejs/9.22.1/firebase-app-compat.js');
 importScripts('https://www.gstatic.com/firebasejs/9.22.1/firebase-messaging-compat.js');
 
-// Firebase config (same as your client config)
-firebase.initializeApp({
-  apiKey: "AIzaSyCgc0xRtijpyPhOovfwg-MzyahsUFh-hiQ",
-  authDomain: "toolsprompt-5b07e.firebaseapp.com",
-  projectId: "toolsprompt-5b07e",
-  storageBucket: "toolsprompt-5b07e.firebasestorage.app",
-  messagingSenderId: "402263780942",
-  appId: "1:402263780942:web:1013a347dbb72db6b31d1f",
-  measurementId: "G-K4KXR4FZCP"
-});
+// For Firebase JS SDK v7.20.0 and later, measurementId is optional
+const firebaseConfig = {
+  apiKey: "AIzaSyASLUfnN4lLtI4GqE9QK3JyWjh2HeS8wsE",
+  authDomain: "promtseen-42a38.firebaseapp.com",
+  projectId: "promtseen-42a38",
+  storageBucket: "promtseen-42a38.firebasestorage.app",
+  messagingSenderId: "620714446859",
+  appId: "1:620714446859:web:019bb7a7e00248e3d6770e",
+  measurementId: "G-PW4Z50GV4H"
+};
 
 const messaging = firebase.messaging();
 

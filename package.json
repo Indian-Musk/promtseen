@@ -29,11 +29,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Indian-Musk/toolsprompt.git"
+    "url": "git+https://github.com/Indian-Musk/promtseen.git"
   },
   "bugs": {
-    "url": "https://github.com/Indian-Musk/toolsprompt/issues"
+    "url": "https://github.com/Indian-Musk/promtseen/issues"
   },
-  "homepage": "https://github.com/Indian-Musk/toolsprompt#readme",
+  "homepage": "https://github.com/Indian-Musk/promtseen#readme",
   "description": ""
 }
