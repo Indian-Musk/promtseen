@@ -7293,7 +7293,7 @@ function generateEnhancedPromptHTML(promptData, affiliates, creatorChannel = nul
 <div class="social-badges-container" id="socialBadgesContainer">
     <button class="social-badges-toggle" id="socialToggleBtn" aria-label="Toggle social badges"><i class="fas fa-chevron-up"></i></button>
     <a href="https://instagram.com/promtseen" target="_blank" class="social-badge instagram-badge" rel="noopener noreferrer"><i class="fab fa-instagram"></i><span class="followers-text">Follow on Insta</span></a>
-    <a href="https://youtube.com/@promtseen" target="_blank" class="social-badge youtube-badge" rel="noopener noreferrer"><i class="fab fa-youtube"></i><span class="followers-text">Subscribe On YT</span></a>
+    <a href="https://youtube.com/@toolsprompt" target="_blank" class="social-badge youtube-badge" rel="noopener noreferrer"><i class="fab fa-youtube"></i><span class="followers-text">Subscribe On YT</span></a>
     <a href="https://wa.me/yourwhatsappnumber" target="_blank" class="social-badge whatsapp-badge" rel="noopener noreferrer"><i class="fab fa-whatsapp"></i><span class="followers-text">Join Whatsapp</span></a>
 </div>
 `;

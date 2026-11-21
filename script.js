@@ -6,6 +6,7 @@
 const firebaseConfig = {
   apiKey: "AIzaSyASLUfnN4lLtI4GqE9QK3JyWjh2HeS8wsE",
   authDomain: "promtseen-42a38.firebaseapp.com",
+  databaseURL: "https://promtseen-42a38-default-rtdb.firebaseio.com",
   projectId: "promtseen-42a38",
   storageBucket: "promtseen-42a38.firebasestorage.app",
   messagingSenderId: "620714446859",
@@ -1559,8 +1560,8 @@ class ShortsHorizontalFeed {
         if (promptId && promptId !== 'unknown') {
             const currentHost = window.location.hostname;
             let targetUrl = `/prompt/${promptId}`;
-            if (currentHost === 'promptseen.co' && window.location.hostname !== 'localhost') {
-                targetUrl = `https://www.promptseen.co/prompt/${promptId}`;
+            if (currentHost === 'promtseen.com' && window.location.hostname !== 'localhost') {
+                targetUrl = `https://promtseen.com/prompt/${promptId}`;
             }
             window.open(targetUrl, '_blank');
         }
@@ -2427,8 +2428,8 @@ class YouTubeStylePrompts {
         if (promptId && promptId !== 'unknown') {
             const currentHost = window.location.hostname;
             let targetUrl = `/prompt/${promptId}`;
-            if (currentHost === 'promptseen.co' && window.location.hostname !== 'localhost') {
-                targetUrl = `https://www.promptseen.co/prompt/${promptId}`;
+            if (currentHost === 'promtseen.com' && window.location.hostname !== 'localhost') {
+                targetUrl = `https://promtseen.com/prompt/${promptId}`;
             }
             window.open(targetUrl, '_blank');
         }

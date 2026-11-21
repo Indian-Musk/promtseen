@@ -8,6 +8,7 @@ importScripts('https://www.gstatic.com/firebasejs/9.22.1/firebase-messaging-comp
 const firebaseConfig = {
   apiKey: "AIzaSyASLUfnN4lLtI4GqE9QK3JyWjh2HeS8wsE",
   authDomain: "promtseen-42a38.firebaseapp.com",
+  databaseURL: "https://promtseen-42a38-default-rtdb.firebaseio.com",
   projectId: "promtseen-42a38",
   storageBucket: "promtseen-42a38.firebasestorage.app",
   messagingSenderId: "620714446859",
